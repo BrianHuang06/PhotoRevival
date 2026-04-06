@@ -1,0 +1,35 @@
+# 虚拟环境
+.venv/
+sdxl_env/
+env/
+venv/
+
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# 生成的输出
+output.jpg
+comparison_grid.png
+restored_photos/
+aged_photos/
+lora_photo_restoration/
+
+# 编译产物
+__pycache__/
+*.pyc
+*.pyo
+
+# 数据集和模型
+dataset/
+local_models/
+old_photos/
+
+# 临时文件
+*.tmp
+*.temp
+logs/
+*.log
