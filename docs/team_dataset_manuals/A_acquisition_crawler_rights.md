@@ -109,7 +109,7 @@ scripts/data/download_loc_dataset.py
 ### 5.2 查看参数
 
 ```powershell
-cd C:\Users\24211\PycharmProjects\PythonProject
+cd C:\Users\24211\PycharmProjects\PhotoRevival
 .\.venv\Scripts\python.exe -m scripts.data.download_loc_dataset --help
 ```
 
@@ -274,7 +274,7 @@ data/raw/library_of_congress/daguerreotypes/
 执行：
 
 ```powershell
-cd C:\Users\24211\PycharmProjects\PythonProject
+cd C:\Users\24211\PycharmProjects\PhotoRevival
 .\.venv\Scripts\python.exe -m scripts.data.team_dataset_workflow import-loc `
   --batch-id 20260727_loc_pilot_001 `
   --operator "你的真实姓名"

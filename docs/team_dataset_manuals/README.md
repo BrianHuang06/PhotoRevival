@@ -36,7 +36,7 @@ NEW
 查看当前状态：
 
 ```powershell
-cd C:\Users\24211\PycharmProjects\PythonProject
+cd C:\Users\24211\PycharmProjects\PhotoRevival
 .\.venv\Scripts\python.exe -m scripts.data.team_dataset_workflow status `
   --batch-id 20260727_loc_pilot_001
 ```

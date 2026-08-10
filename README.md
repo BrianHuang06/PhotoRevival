@@ -1,6 +1,6 @@
-# PhotoRevive 老照片修复系统
+# 尘拂光回（PhotoRevival）老照片修复系统
 
-PhotoRevive 是一个面向老照片划痕检测、内容修复和清晰度增强的本地应用。项目由 React 前端、Flask 后端和 Python 图像修复流水线组成，主要使用 SDXL Inpainting、LoRA 和 SwinIR。
+尘拂光回（PhotoRevival）是一个面向老照片划痕检测、内容修复和清晰度增强的本地应用。项目由 React 前端、Flask 后端和 Python 图像修复流水线组成，主要使用 SDXL Inpainting、LoRA 和 SwinIR。
 
 ## 主要功能
 
@@ -31,7 +31,7 @@ SDXL Inpainting + LoRA 内容修复
 ## 项目结构
 
 ```text
-PhotoRevive/
+PhotoRevival/
 ├── src/photo_revival/           # 后端核心 Python 包
 │   ├── api/server.py            # Flask 服务及接口
 │   ├── two_stage_restoration.py # 两阶段修复主流程

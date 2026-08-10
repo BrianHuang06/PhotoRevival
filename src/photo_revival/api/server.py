@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-PhotoRevive Backend API Server
+PhotoRevival Backend API Server
 Flask REST API for old photo restoration
 """
 
@@ -411,7 +411,7 @@ def serve_frontend(path):
     dist_dir = os.path.join(BASE_DIR, "frontend", "dist")
     if not os.path.exists(dist_dir):
         return jsonify({
-            "message": "PhotoRevive API is running. Build frontend with: cd frontend && npm run build",
+            "message": "PhotoRevival API is running. Build frontend with: cd frontend && npm run build",
             "api_docs": "/api/status",
         })
 
@@ -423,7 +423,7 @@ def serve_frontend(path):
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("PhotoRevive API Server")
+    print("PhotoRevival API Server")
     print("=" * 50)
 
     history = load_history()

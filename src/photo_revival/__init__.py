@@ -1,2 +1,1 @@
-"""PhotoRevive core package."""
-
+"""PhotoRevival core package."""

@@ -30,7 +30,7 @@
 在项目根目录打开 PowerShell：
 
 ```powershell
-cd C:\Users\24211\PycharmProjects\PythonProject
+cd C:\Users\24211\PycharmProjects\PhotoRevival
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
 ```

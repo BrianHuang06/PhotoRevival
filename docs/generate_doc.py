@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from pathlib import Path
+
 import docx
 from docx import Document
 from docx.shared import Pt, Cm, Inches, RGBColor
@@ -331,6 +333,7 @@ add_para(
 )
 
 # ===== 保存 =====
-output_path = r'c:\Users\24211\PycharmProjects\PythonProject\尘拂光回_创意赛道项目计划书.docx'
+output_path = Path(__file__).resolve().parent / 'reports' / '尘拂光回_创意赛道项目计划书.docx'
+output_path.parent.mkdir(parents=True, exist_ok=True)
 doc.save(output_path)
 print(f'Document saved to: {output_path}')

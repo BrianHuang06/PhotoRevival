@@ -1,4 +1,4 @@
-"""Reusable training components for PhotoRevive."""
+"""Reusable training components for PhotoRevival."""
 
 from photo_revival.training.config import TrainingConfig
 

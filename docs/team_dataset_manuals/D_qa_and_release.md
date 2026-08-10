@@ -58,7 +58,7 @@ reviewed_at=日期时间
 先运行机器验收：
 
 ```powershell
-cd C:\Users\24211\PycharmProjects\PythonProject
+cd C:\Users\24211\PycharmProjects\PhotoRevival
 .\.venv\Scripts\python.exe -m scripts.data.team_dataset_workflow validate-annotations `
   --batch-id 20260727_loc_pilot_001
 ```

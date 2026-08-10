@@ -17,10 +17,10 @@ export default function Header() {
             <Sparkles className="h-4 w-4 text-dark-950" />
           </div>
           <h1 className="font-display text-lg font-semibold tracking-wide text-ivory">
-            时光修复工坊
+            尘拂光回
           </h1>
           <span className="hidden text-xs text-ivory-dim sm:inline">
-            PhotoRevive
+            PhotoRevival
           </span>
         </div>
 

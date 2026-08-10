@@ -1,4 +1,4 @@
-"""Train the unified PhotoRevive SDXL inpainting LoRA pipeline."""
+"""Train the unified PhotoRevival SDXL inpainting LoRA pipeline."""
 
 from __future__ import annotations
 

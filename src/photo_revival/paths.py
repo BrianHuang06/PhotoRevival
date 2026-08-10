@@ -1,4 +1,4 @@
-"""Shared filesystem paths for the PhotoRevive project."""
+"""Shared filesystem paths for the PhotoRevival project."""
 
 from pathlib import Path
 

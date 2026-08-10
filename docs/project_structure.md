@@ -1,9 +1,9 @@
 # 项目结构说明
 
-PhotoRevive 使用 `src` 布局，代码、数据、模型、第三方依赖和运行产物彼此分离。
+PhotoRevival 使用 `src` 布局，代码、数据、模型、第三方依赖和运行产物彼此分离。
 
 ```text
-PhotoRevive/
+PhotoRevival/
 ├── src/photo_revival/       # 可复用 Python 包
 ├── scripts/                 # 训练、评估、诊断和数据脚本
 ├── frontend/                # React/Vite 前端

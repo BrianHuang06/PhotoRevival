@@ -20,7 +20,7 @@ CLEANED -> ANNOTATED
 生成当前首批任务表：
 
 ```powershell
-cd C:\Users\24211\PycharmProjects\PythonProject
+cd C:\Users\24211\PycharmProjects\PhotoRevival
 .\.venv\Scripts\python.exe -m scripts.data.team_dataset_workflow prepare-annotations `
   --batch-id 20260727_loc_pilot_001 `
   --annotator "你的真实姓名"
