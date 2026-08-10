@@ -1,0 +1,17 @@
+accelerate
+diffusers
+flask
+flask-cors
+numpy
+opencv-python
+peft
+pillow
+safetensors
+scikit-image
+scikit-learn
+scipy
+timm
+torch
+torchvision
+tqdm
+transformers

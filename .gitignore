@@ -1,35 +1,38 @@
-# 虚拟环境
+# Python environments and caches
 .venv/
-sdxl_env/
-env/
 venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# IDE 配置
+# IDE and operating-system files
 .idea/
 .vscode/
+.trae/
 *.swp
 *.swo
 .DS_Store
+Thumbs.db
 
-# 生成的输出
-output.jpg
-comparison_grid.png
-restored_photos/
-aged_photos/
-lora_photo_restoration/
+# Frontend dependencies and builds
+frontend/node_modules/
+frontend/dist/
 
-# 编译产物
-__pycache__/
-*.pyc
-*.pyo
+# Local datasets, models, third-party sources, and generated artifacts
+/data/
+/models/
+/artifacts/
+/third_party/
 
-# 数据集和模型
-dataset/
-local_models/
-old_photos/
-
-# 临时文件
+# Logs and temporary files
+*.log
 *.tmp
 *.temp
-logs/
-*.log
+
+# Python packaging output
+build/
+dist/
