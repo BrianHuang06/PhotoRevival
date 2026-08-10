@@ -8,11 +8,11 @@ target images into paired training data. For every clean image it writes:
     masks/<source_id>_<severity>.png        # 0 = clean, 255 = damaged
     metadata/<source_id>.json               # all severities + material records
 
-plus a manifest.csv, summary.json and per-source comparison collages. The
-damage mask is derived from cataloged texture material pixels, never from a
-detector prediction. No procedural aging operation is allowed. All randomness
-comes from a single per-variant numpy Generator so every variant is
-reproducible from the seed recorded in metadata.
+plus a manifest.csv, summary.json, MASK_HANDOFF.md and per-source comparison
+collages. The damage mask is derived from cataloged texture material pixels,
+never from a detector prediction. No procedural aging operation is allowed.
+All randomness comes from a single per-variant numpy Generator so every
+variant is reproducible from the seed recorded in metadata.
 
 Usage (from the repo root):
 
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -45,6 +46,7 @@ from scripts.synthetic.engine import (
     coverage_of,
     degrade_target,
     derive_variant_seed,
+    evaluate_damage_score,
     load_texture_catalog,
     save_variant_files,
     texture_catalog_summary,
@@ -70,8 +72,9 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 SYNTHETIC_MANIFEST_FIELDS = [
     "source_id", "severity", "seed", "restoration_type", "mask_coverage",
-    "width", "height", "target_path", "degraded_path", "mask_path",
-    "metadata_path", "sha256_degraded", "created_at",
+    "damage_score", "layer_count", "label_combination", "width", "height",
+    "target_path", "degraded_path", "mask_path", "metadata_path",
+    "sha256_degraded", "created_at",
 ]
 
 DEFAULT_FIXTURE_DIR = Path("artifacts/synthetic_fixture/clean")
@@ -120,6 +123,179 @@ def create_review_contact_sheet(
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(output, "JPEG", quality=92)
+
+
+def _markdown_relative_path(path: Path, document_dir: Path) -> str:
+    return os.path.relpath(path, document_dir).replace("\\", "/")
+
+
+def _markdown_cell(value: object) -> str:
+    return str(value).replace("|", "\\|").replace("\n", "<br>")
+
+
+def write_mask_handoff(
+    output_root: Path,
+    destination: Path | None = None,
+) -> Path:
+    """Write a portable mask inventory grouped by main--sub label combinations."""
+    output_root = Path(output_root)
+    destination = (
+        Path(destination)
+        if destination is not None
+        else output_root / "MASK_HANDOFF.md"
+    )
+    manifest_path = output_root / "manifest.csv"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Cannot build handoff without {manifest_path}")
+
+    rows = read_csv(manifest_path)
+    label_counts: Counter[str] = Counter()
+    texture_counts: Counter[str] = Counter()
+    catalog_hashes: set[str] = set()
+    row_details: list[dict] = []
+    for row in rows:
+        metadata_path = output_root / row["metadata_path"]
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        variant = metadata["variants"][row["severity"]]
+        catalog_hashes.add(
+            str((variant.get("material_catalog") or {}).get("sha256", ""))
+        )
+        steps = variant.get("steps") or []
+        labels = list(
+            dict.fromkeys(
+                str(step["params"]["label_path"])
+                for step in steps
+            )
+        )
+        textures = [str(step["params"]["texture"]) for step in steps]
+        label_counts.update(labels)
+        texture_counts.update(textures)
+        row_details.append(
+            {
+                **row,
+                "labels": labels,
+                "textures": textures,
+            }
+        )
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    document_dir = destination.parent
+    catalog_hash = ", ".join(sorted(value for value in catalog_hashes if value))
+    lines = [
+        "# Mask 素材标签与破损评分交接表",
+        "",
+        "## 交付概况",
+        "",
+        f"- 生成时间：{utc_now()}",
+        f"- 样例目录：`{_markdown_cell(_markdown_relative_path(output_root, document_dir))}`",
+        f"- Mask 数量：{len(row_details)}",
+        f"- 素材目录哈希：`{catalog_hash}`",
+        "- 生成模式：仅组合已分类素材，不使用程序生成的做旧纹理。",
+        "- 标签来源：人工视觉分类（`manual_visual`），不是 OCR。",
+        "- 标签格式：`主标签--子标签`；多标签组合用 ` + ` 连接。",
+        "",
+        "## 破损评分",
+        "",
+        "| 分量 | 最高分 | 含义 |",
+        "|---|---:|---|",
+        "| 覆盖率 | 50 | 最终二值 mask 的受损像素比例，32% 覆盖时达到该分量上限 |",
+        "| 素材强度 | 32 | 各层覆盖率、透明度、破损类别、尺度、密度和分布加权累计 |",
+        "| 层数存在度 | 8 | 随实际组合层数对数增长，不用固定素材数量限制等级 |",
+        "| 标签多样性 | 10 | 组合中不同主标签和子标签的丰富度 |",
+        "",
+        "| 等级 | 分数范围 | 覆盖率约束 |",
+        "|---|---:|---:|",
+        "| light | 15-34 | 1%-8% |",
+        "| medium | 35-64 | 5%-20% |",
+        "| heavy | 65-90 | 15%-32% |",
+        "",
+        "## 标签使用统计",
+        "",
+        "| 主标签--子标签 | 使用该标签的 Mask 数 |",
+        "|---|---:|",
+    ]
+    for label, count in sorted(label_counts.items()):
+        lines.append(f"| `{_markdown_cell(label)}` | {count} |")
+
+    lines.extend(
+        [
+            "",
+            "## 素材使用统计",
+            "",
+            "| 素材文件 | 使用次数 |",
+            "|---|---:|",
+        ]
+    )
+    for texture, count in sorted(texture_counts.items()):
+        lines.append(f"| `{_markdown_cell(texture)}` | {count} |")
+
+    grouped: dict[str, list[dict]] = {}
+    for row in row_details:
+        grouped.setdefault(row["label_combination"], []).append(row)
+    lines.extend(["", "## 全部 Mask", ""])
+    for combination in sorted(grouped):
+        lines.extend(
+            [
+                f"### `{_markdown_cell(combination)}`",
+                "",
+                "| Mask | 来源 / 等级 | 分数 | 覆盖率 | 层数 | 素材 | 文件 |",
+                "|---|---|---:|---:|---:|---|---|",
+            ]
+        )
+        group_rows = sorted(
+            grouped[combination],
+            key=lambda item: (
+                item["source_id"],
+                {"light": 1, "medium": 2, "heavy": 3}[item["severity"]],
+            ),
+        )
+        for row in group_rows:
+            mask_path = _markdown_relative_path(
+                output_root / row["mask_path"],
+                document_dir,
+            )
+            degraded_path = _markdown_relative_path(
+                output_root / row["degraded_path"],
+                document_dir,
+            )
+            metadata_path = _markdown_relative_path(
+                output_root / row["metadata_path"],
+                document_dir,
+            )
+            textures = "<br>".join(
+                f"`{_markdown_cell(texture)}`"
+                for texture in row["textures"]
+            )
+            files = (
+                f"[degraded](<{degraded_path}>)<br>"
+                f"[metadata](<{metadata_path}>)"
+            )
+            lines.append(
+                f"| ![{_markdown_cell(row['source_id'])} "
+                f"{row['severity']}](<{mask_path}>) | "
+                f"`{_markdown_cell(row['source_id'])}` / "
+                f"`{row['severity']}` | "
+                f"{float(row['damage_score']):.2f} | "
+                f"{float(row['mask_coverage']):.2f}% | "
+                f"{int(row['layer_count'])} | {textures} | {files} |"
+            )
+        lines.append("")
+
+    lines.extend(
+        [
+            "## 交接字段",
+            "",
+            "- `damage_score`：0-100 的综合破损分数。",
+            "- `layer_count`：该图片实际组合的素材层数。",
+            "- `label_combination`：按首次出现顺序去重后的标签组合。",
+            "- `damage_assessment.layer_scores`：每一层素材的评分明细。",
+            "- `category_recipe`：组合顺序、标签、类别和素材文件。",
+            "- `mask_coverage`：最终联合二值 mask 的覆盖率。",
+            "",
+        ]
+    )
+    destination.write_text("\n".join(lines), encoding="utf-8")
+    return destination
 
 
 def _git_commit() -> str:
@@ -240,10 +416,6 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
         for row in read_csv(manifest_csv):
             manifest_index[(row["source_id"], row["severity"])] = row
 
-    counts: Counter[str] = Counter()
-    restoration_counter: Counter[str] = Counter()
-    ops_counter: Counter[str] = Counter()
-    coverage_values: list[float] = []
     processed_sources: list[str] = []
     new_variants = 0
 
@@ -276,17 +448,15 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
 
             processed_sources.append(source_id)
             new_variants += 1
-            counts[severity] += 1
-            restoration_counter[variant.metadata["restoration_type"]] += 1
-            coverage_values.append(variant.coverage)
-            for step in variant.metadata["steps"]:
-                ops_counter[step["op"]] += 1
             manifest_index[(source_id, severity)] = {
                 "source_id": source_id,
                 "severity": severity,
                 "seed": seed,
                 "restoration_type": variant.metadata["restoration_type"],
                 "mask_coverage": round(variant.coverage, 4),
+                "damage_score": variant.metadata["damage_score"],
+                "layer_count": variant.metadata["layer_count"],
+                "label_combination": variant.metadata["label_combination"],
                 "width": variant.degraded.width,
                 "height": variant.degraded.height,
                 "target_path": f"target/{source_id}.png",
@@ -319,6 +489,34 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
 
     manifest_rows = [manifest_index[key] for key in sorted(manifest_index)]
     write_csv(output_root / "manifest.csv", manifest_rows, SYNTHETIC_MANIFEST_FIELDS)
+
+    coverage_values = [
+        float(row["mask_coverage"])
+        for row in manifest_rows
+    ]
+    damage_score_values = [
+        float(row["damage_score"])
+        for row in manifest_rows
+    ]
+    layer_count_values = [
+        float(row["layer_count"])
+        for row in manifest_rows
+    ]
+    counts = Counter(row["severity"] for row in manifest_rows)
+    restoration_counter = Counter(
+        row["restoration_type"]
+        for row in manifest_rows
+    )
+    ops_counter = Counter()
+    for row in manifest_rows:
+        metadata = json.loads(
+            (output_root / row["metadata_path"]).read_text(encoding="utf-8")
+        )
+        variant = metadata["variants"][row["severity"]]
+        ops_counter.update(
+            step["op"]
+            for step in variant.get("steps") or []
+        )
 
     collage_paths = sorted(collages_dir.glob("*_comparison.png"))
     if collage_paths:
@@ -356,11 +554,13 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
             "numpy": np.__version__,
         },
         "counts": {
-            "sources": len(set(processed_sources)),
+            "sources": len({row["source_id"] for row in manifest_rows}),
             "variants": len(manifest_rows),
             "per_severity": dict(counts),
         },
         "coverage": coverage_summary,
+        "damage_score": _numeric_stats(damage_score_values),
+        "layer_count": _numeric_stats(layer_count_values),
         "restoration_types": dict(restoration_counter),
         "ops_used": dict(ops_counter),
         "material_catalog": catalog_summary,
@@ -374,10 +574,17 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
         "output_dir": str(output_root),
         "processed_sources": processed_sources,
     })
+    handoff_path = (
+        Path(args.handoff_md)
+        if args.handoff_md
+        else output_root / "MASK_HANDOFF.md"
+    )
+    write_mask_handoff(output_root, handoff_path)
 
     print(
         f"generated {new_variants} new variants this run; "
-        f"manifest has {len(manifest_rows)} total -> {output_root}"
+        f"manifest has {len(manifest_rows)} total -> {output_root}; "
+        f"handoff -> {handoff_path}"
     )
 
 
@@ -403,6 +610,16 @@ def _coverage_stats(values: list[float]) -> dict:
         "mean": round(sum(values) / len(values), 3),
         "max": round(max(values), 3),
         "histogram": buckets,
+    }
+
+
+def _numeric_stats(values: list[float]) -> dict:
+    if not values:
+        return {"min": None, "mean": None, "max": None}
+    return {
+        "min": round(min(values), 3),
+        "mean": round(sum(values) / len(values), 3),
+        "max": round(max(values), 3),
     }
 
 
@@ -541,6 +758,34 @@ def verify(args: argparse.Namespace, output_root: Path) -> None:
                 steps = variant_meta.get("steps") or []
                 if not steps:
                     errors.append(f"{source_id}/{severity}: metadata has no steps")
+                assessment = evaluate_damage_score(recomputed, steps)
+                score = float(assessment["score"])
+                score_lo, score_hi = SEVERITY_PROFILE[severity]["score_target"]
+                if not (score_lo <= score <= score_hi):
+                    errors.append(
+                        f"{source_id}/{severity}: damage score {score:.2f} "
+                        f"outside [{score_lo:.2f}, {score_hi:.2f}]"
+                    )
+                if abs(score - float(row.get("damage_score", -1.0))) > 0.05:
+                    errors.append(
+                        f"{source_id}/{severity}: manifest damage score mismatch"
+                    )
+                if int(row.get("layer_count", -1)) != len(steps):
+                    errors.append(
+                        f"{source_id}/{severity}: manifest layer count mismatch"
+                    )
+                label_paths = list(
+                    dict.fromkeys(
+                        str((step.get("params") or {}).get("label_path"))
+                        for step in steps
+                    )
+                )
+                label_combination = " + ".join(label_paths)
+                if row.get("label_combination") != label_combination:
+                    errors.append(
+                        f"{source_id}/{severity}: manifest label combination "
+                        f"mismatch"
+                    )
                 for step in steps:
                     if "op" not in step or "params" not in step:
                         errors.append(f"{source_id}/{severity}: malformed step entry")
@@ -555,6 +800,10 @@ def verify(args: argparse.Namespace, output_root: Path) -> None:
                         )
                     elif (
                         params.get("category") != record.primary_category
+                        or params.get("main_label") != record.main_label
+                        or params.get("sub_label") != record.sub_label
+                        or params.get("label_path") != record.label_path
+                        or params.get("label_source") != record.label_source
                         or params.get("blend_mode") != record.blend_mode
                     ):
                         errors.append(
@@ -564,21 +813,39 @@ def verify(args: argparse.Namespace, output_root: Path) -> None:
                 size = variant_meta.get("image_size")
                 if degraded_size is not None and size != list(degraded_size):
                     errors.append(f"{source_id}/{severity}: metadata image_size mismatch")
-                expected_groups = [
-                    slot["group"] for slot in SEVERITY_PROFILE[severity]["slots"]
-                ]
                 actual_recipe = variant_meta.get("category_recipe") or []
-                actual_groups = [item.get("group") for item in actual_recipe]
-                if actual_groups != expected_groups:
+                if len(actual_recipe) != len(steps):
                     errors.append(
-                        f"{source_id}/{severity}: category recipe groups "
-                        f"{actual_groups} != {expected_groups}"
+                        f"{source_id}/{severity}: recipe/step count mismatch"
                     )
-                if len(steps) != len(expected_groups):
-                    errors.append(
-                        f"{source_id}/{severity}: expected {len(expected_groups)} "
-                        f"material steps, got {len(steps)}"
+                profile = SEVERITY_PROFILE[severity]
+                allowed_groups: dict[str, set[str]] = {}
+                for slot in (
+                    profile["required_slots"] + profile["optional_slots"]
+                ):
+                    allowed_groups.setdefault(slot["group"], set()).update(
+                        slot["categories"]
                     )
+                for slot in profile["required_slots"]:
+                    if not any(
+                        item.get("group") == slot["group"]
+                        and item.get("category") in slot["categories"]
+                        for item in actual_recipe
+                    ):
+                        errors.append(
+                            f"{source_id}/{severity}: missing required group "
+                            f"{slot['group']}"
+                        )
+                for item in actual_recipe:
+                    group = item.get("group")
+                    if (
+                        group not in allowed_groups
+                        or item.get("category") not in allowed_groups[group]
+                    ):
+                        errors.append(
+                            f"{source_id}/{severity}: recipe item outside "
+                            f"allowed label groups"
+                        )
 
             # reproduction spot check (first variant only) - strongest guarantee
             if not reproduction_checked:
@@ -656,6 +923,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="like --limit but also writes sample_manifest.csv + sample contact sheet")
     parser.add_argument("--no-collages", action="store_true")
     parser.add_argument("--force", action="store_true", help="overwrite existing variants")
+    parser.add_argument(
+        "--handoff-md",
+        help="write the grouped mask handoff Markdown to this path",
+    )
     parser.add_argument("--contact-sheet-only", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--make-fixture", action="store_true")

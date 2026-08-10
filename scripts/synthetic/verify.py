@@ -33,6 +33,7 @@ from scripts.synthetic.engine import (
     coverage_of,
     degrade_target,
     derive_variant_seed,
+    evaluate_damage_score,
     texture_catalog_summary,
     validate_material_only_metadata,
 )
@@ -58,6 +59,7 @@ def _args(**overrides) -> SimpleNamespace:
         sample=None,
         no_collages=False,
         force=False,
+        handoff_md=None,
         contact_sheet_only=False,
         verify_only=False,
         make_fixture=False,
@@ -106,6 +108,7 @@ def main() -> int:
         def check_imports() -> str:
             assert callable(degrade_target), "degrade_target not callable"
             assert callable(coverage_of), "coverage_of not callable"
+            assert callable(evaluate_damage_score), "damage score not callable"
             assert callable(gen.generate) and callable(gen.verify), "CLI functions missing"
             assert gen.build_parser(), "parser not constructible"
             summary = texture_catalog_summary()
@@ -147,8 +150,12 @@ def main() -> int:
                 assert (out_dir / sub).is_dir(), f"missing {sub}/"
             assert (out_dir / "summary.json").is_file()
             assert (out_dir / "contact_sheet.jpg").is_file()
+            handoff = out_dir / "MASK_HANDOFF.md"
+            assert handoff.is_file(), "missing MASK_HANDOFF.md"
+            handoff_text = handoff.read_text(encoding="utf-8")
+            assert handoff_text.count("![") == 9, "handoff does not list all masks"
             assert (out_dir / "collages").is_dir()
-            return "9 variants generated with full layout"
+            return "9 variants generated with full layout + grouped mask handoff"
 
         # 05 - generator's own verify passes
         def check_verify() -> str:
@@ -191,8 +198,8 @@ def main() -> int:
                 mask.close(); target.close(); degraded.close()
             return f"{len(manifest)} material masks: L mode, binary, non-empty"
 
-        # 08 - coverage within configured bounds and consistent with metadata
-        def check_coverage() -> str:
+        # 08 - coverage + damage score match the configured severity
+        def check_coverage_and_score() -> str:
             manifest = gen.read_csv(out_dir / "manifest.csv")
             for row in manifest:
                 mask = Image.open(out_dir / row["mask_path"])
@@ -204,8 +211,27 @@ def main() -> int:
                     f"{row['source_id']}/{row['severity']} cov "
                     f"{recomputed:.2f} out of [{lo},{hi}]"
                 )
+                metadata = json.loads(
+                    (out_dir / row["metadata_path"]).read_text(encoding="utf-8")
+                )
+                steps = metadata["variants"][row["severity"]]["steps"]
+                assessment = evaluate_damage_score(recomputed, steps)
+                score = float(assessment["score"])
+                recorded_score = float(row["damage_score"])
+                score_lo, score_hi = SEVERITY_PROFILE[
+                    row["severity"]
+                ]["score_target"]
+                assert abs(score - recorded_score) <= 0.05, (
+                    f"{row['source_id']}/{row['severity']} score "
+                    f"{score:.2f} != {recorded_score:.2f}"
+                )
+                assert score_lo <= score <= score_hi, (
+                    f"{row['source_id']}/{row['severity']} score "
+                    f"{score:.2f} out of [{score_lo},{score_hi}]"
+                )
+                assert assessment["level"] == row["severity"]
                 mask.close()
-            return "coverage matches each light/medium/heavy material profile"
+            return "coverage and 0-100 score match every severity profile"
 
         # 09 - metadata schema completeness
         def check_metadata() -> str:
@@ -221,7 +247,18 @@ def main() -> int:
                 for sev in SEVERITIES:
                     variant_meta = variants.get(sev)
                     assert variant_meta is not None, f"{row['source_id']} missing variant {sev}"
-                    for key in ("seed", "severity", "restoration_type", "mask_coverage", "image_size", "steps"):
+                    for key in (
+                        "seed",
+                        "severity",
+                        "restoration_type",
+                        "mask_coverage",
+                        "damage_score",
+                        "damage_assessment",
+                        "layer_count",
+                        "label_combination",
+                        "image_size",
+                        "steps",
+                    ):
                         assert key in variant_meta, f"{row['source_id']}/{sev} missing metadata.{key}"
                     assert variant_meta["severity"] == sev
                     assert variant_meta["restoration_type"] == "local_repair"
@@ -231,18 +268,25 @@ def main() -> int:
                         f"{row['source_id']}/{sev}: {material_errors}"
                     )
                     assert variant_meta["material_catalog"]["sha256"] == expected_sha
-                    expected_groups = [
-                        slot["group"] for slot in SEVERITY_PROFILE[sev]["slots"]
-                    ]
-                    recipe_groups = [
-                        item["group"] for item in variant_meta["category_recipe"]
-                    ]
-                    assert recipe_groups == expected_groups
-                    assert len(variant_meta["steps"]) == len(expected_groups)
+                    profile = SEVERITY_PROFILE[sev]
+                    recipe = variant_meta["category_recipe"]
+                    assert len(recipe) == len(variant_meta["steps"])
+                    assert variant_meta["layer_count"] == len(recipe)
+                    for slot in profile["required_slots"]:
+                        assert any(
+                            item["group"] == slot["group"]
+                            and item["category"] in slot["categories"]
+                            for item in recipe
+                        ), f"{row['source_id']}/{sev} missing {slot['group']}"
                     assert all(
                         step["op"] == "texture_composite"
                         for step in variant_meta["steps"]
                     )
+            assert any(
+                int(row["layer_count"])
+                > len(SEVERITY_PROFILE[row["severity"]]["required_slots"])
+                for row in manifest
+            ), "no sample demonstrated score-driven variable material count"
             return f"{len(source_ids)} sources: strict material metadata complete"
 
         # 10 - strict material boundary: no changes outside the material mask
@@ -348,7 +392,7 @@ def main() -> int:
             ("05 built-in verify passes", check_verify),
             ("06 determinism (byte-level)", check_determinism),
             ("07 mask properties", check_mask_properties),
-            ("08 coverage bounds", check_coverage),
+            ("08 coverage + damage score", check_coverage_and_score),
             ("09 metadata schema", check_metadata),
             ("10 material-only boundary", check_material_only_boundary),
             ("11 sample mode", check_sample),

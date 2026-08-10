@@ -1,9 +1,9 @@
 """Build and review the material-only texture catalog.
 
 The source texture pack uses numeric filenames and does not provide semantic
-labels. This script combines visually reviewed tags with measured image
-features, writes a deterministic CSV catalog, and renders per-category contact
-sheets for later human correction.
+labels. The semantic labels in this script are assigned by visual review.
+Measured image features are retained only as auditable material-selection
+fields; they do not decide the damage label.
 
 Run from the repository root:
 
@@ -28,74 +28,119 @@ from scripts.synthetic.texture_assets import DEFAULT_TEXTURE_DIR, list_texture_p
 DEFAULT_CATALOG_PATH = Path(__file__).with_name("texture_catalog.csv")
 DEFAULT_REVIEW_DIR = Path(__file__).with_name("texture_reviews")
 
-CATEGORIES = (
-    "scratch",
-    "crack",
-    "dust",
-    "stain",
-    "mold",
-    "surface_wear",
-    "edge_wear",
-    "fold",
-    "tear_missing",
-    "mixed",
-    "reject",
+# Main label -> sub-labels. The path in the catalog is written as
+# ``main_label--sub_label`` so the hierarchy is explicit to downstream code.
+LABEL_GROUPS: dict[str, tuple[str, ...]] = {
+    "detail": ("scratch", "crack", "dust"),
+    "area": ("stain", "mold", "surface_wear"),
+    "structure": ("edge_wear", "fold", "tear_missing"),
+    "reject": ("reject",),
+}
+CATEGORIES = tuple(
+    sub_label
+    for sub_labels in LABEL_GROUPS.values()
+    for sub_label in sub_labels
 )
+SUB_LABEL_TO_MAIN = {
+    sub_label: main_label
+    for main_label, sub_labels in LABEL_GROUPS.items()
+    for sub_label in sub_labels
+}
 
-# These sets come from visual inspection of all 250 numbered texture sheets.
-# A texture may occur in several sets; PRIMARY_PRIORITY resolves its main role
-# while the complete overlap is retained in the semicolon-separated tags.
-MANUAL_TAGS: dict[str, set[int]] = {
-    "fold": {
-        28, 32, 35, 44, 46, 58, 59, 65, 66, 73, 78, 89, 105, 117, 123,
-        126, 131, 143, 153, 173, 175, 176, 181, 186, 200, 226, 233, 242, 248,
-    },
-    "crack": {48, 109, 116, 135, 185, 215, 240, 246},
-    "tear_missing": {51, 115, 141, 170, 201, 221},
-    "scratch": {
-        9, 31, 35, 48, 93, 96, 117, 124, 135, 159, 181, 185, 209, 215,
-        246, 248, 250,
-    },
-    "dust": {
-        15, 18, 24, 69, 71, 72, 79, 83, 86, 102, 112, 119, 129, 139, 144,
-        162, 163, 168, 169, 188, 202, 204, 211, 213, 219, 227, 235, 245,
-    },
-    "stain": {
-        4, 7, 21, 25, 32, 37, 51, 56, 68, 91, 101, 112, 115, 132, 137,
-        141, 154, 165, 167, 170, 182, 186, 192, 193, 194, 201, 208, 221,
-        229, 234, 237, 239, 250,
+# Exactly one primary sub-label is assigned to every numbered source by visual
+# review. Overlapping visual appearances are recorded in AUXILIARY_TAGS below.
+MANUAL_PRIMARY: dict[str, set[int]] = {
+    "surface_wear": {
+        1, 3, 20, 22, 26, 28, 34, 38, 43, 44, 46, 49, 52, 58, 61, 63, 65,
+        66, 73, 76, 77, 78, 82, 88, 95, 96, 104, 114, 130, 134, 140, 143,
+        147, 148, 155, 157, 159, 161, 178, 186, 187, 189, 190, 195, 196,
+        199, 200, 205, 206, 210, 218, 226, 228, 241,
     },
     "mold": {
-        2, 4, 8, 10, 16, 23, 39, 41, 45, 47, 51, 55, 57, 62, 64, 67,
-        75, 84, 85, 87, 97, 98, 101, 103, 107, 121, 128, 130, 133, 134,
-        137, 138, 142, 145, 151, 156, 157, 158, 164, 167, 180, 182, 184,
-        191, 193, 194, 197, 198, 207, 208, 210, 216, 217, 223, 225, 228,
-        229, 231, 234, 236, 238, 239, 241, 243,
+        2, 6, 8, 16, 23, 39, 41, 42, 45, 47, 62, 64, 67, 75, 80, 85, 87,
+        97, 103, 110, 121, 138, 142, 145, 151, 156, 180, 182, 193, 197,
+        198, 207, 216, 217, 223, 225, 231, 234, 238,
+    },
+    "stain": {
+        5, 7, 10, 12, 13, 21, 25, 29, 33, 40, 68, 74, 83, 84, 90, 91, 94,
+        98, 101, 111, 112, 113, 118, 119, 125, 132, 137, 149, 154, 164,
+        165, 167, 171, 192, 224, 229, 230, 232, 237, 239, 249,
+    },
+    "dust": {
+        15, 18, 19, 27, 30, 50, 54, 60, 69, 71, 79, 86, 92, 100, 102, 108,
+        129, 136, 139, 144, 152, 160, 162, 163, 168, 169, 172, 179, 183,
+        188, 202, 204, 211, 212, 213, 214, 215, 219, 220, 227, 235, 244,
+        245, 250,
+    },
+    "scratch": {
+        9, 17, 31, 35, 48, 53, 72, 93, 106, 117, 122, 124, 127, 181, 209,
+        243, 246,
+    },
+    "crack": {109, 116, 135, 185, 240},
+    "fold": {
+        32, 36, 59, 89, 105, 123, 126, 131, 153, 173, 175, 176, 242, 248,
     },
     "edge_wear": {
-        11, 14, 24, 37, 55, 56, 81, 99, 102, 107, 115, 120, 128, 133,
-        135, 146, 158, 166, 170, 174, 176, 194, 200, 208, 221, 222, 233,
-        236, 248,
+        4, 11, 14, 24, 37, 55, 56, 57, 70, 81, 99, 107, 120, 128, 133,
+        146, 158, 166, 174, 177, 184, 191, 194, 208, 222, 233, 236,
     },
+    "tear_missing": {51, 115, 141, 170, 201, 221},
     "reject": {150, 203, 247},
 }
 
-PRIMARY_PRIORITY = (
-    "reject",
-    "tear_missing",
-    "crack",
-    "fold",
-    "edge_wear",
-    "scratch",
-    "dust",
-    "stain",
-    "mold",
-)
+# Auxiliary labels are deliberately narrower than the primary map. They keep
+# useful overlap information without turning "mixed" into a semantic bucket.
+AUXILIARY_TAGS: dict[str, set[int]] = {
+    "scratch": {
+        11, 17, 24, 31, 35, 48, 53, 72, 93, 96, 106, 117, 122, 124, 127,
+        155, 181, 209, 243, 246, 248,
+    },
+    "crack": {109, 116, 135, 185, 240},
+    "fold": {
+        32, 36, 59, 89, 105, 123, 126, 131, 153, 173, 175, 176, 242, 248,
+    },
+    "dust": {
+        17, 19, 24, 50, 60, 69, 71, 79, 86, 92, 100, 102, 108, 111, 118,
+        127, 129, 136, 139, 144, 152, 160, 162, 163, 168, 169, 172, 179,
+        183, 188, 202, 204, 211, 212, 213, 214, 215, 219, 220, 227, 235,
+        244, 245, 250,
+    },
+    "stain": {
+        2, 4, 7, 10, 12, 13, 21, 25, 29, 32, 33, 37, 40, 41, 51, 56, 57,
+        64, 67, 68, 74, 83, 84, 90, 91, 94, 97, 98, 101, 103, 110, 111,
+        112, 113, 118, 119, 121, 125, 132, 137, 149, 154, 164, 165, 167,
+        170, 171, 182, 186, 192, 193, 194, 201, 207, 208, 216, 221, 224,
+        229, 230, 231, 232, 237, 238, 239, 249,
+    },
+    "mold": {
+        2, 6, 8, 16, 23, 39, 41, 42, 45, 47, 62, 64, 67, 75, 80, 84, 85,
+        87, 97, 103, 110, 121, 138, 142, 145, 151, 156, 164, 180, 182, 193,
+        197, 198, 207, 216, 217, 223, 225, 231, 234, 238,
+    },
+    "surface_wear": {
+        4, 11, 14, 20, 22, 28, 32, 34, 36, 37, 38, 40, 44, 46, 52, 55, 56,
+        58, 61, 63, 65, 66, 73, 74, 76, 77, 78, 81, 82, 88, 94, 95, 98, 99,
+        96, 104, 107, 114, 117, 120, 122, 123, 125, 126, 128, 130, 131, 134,
+        140, 143, 146, 147, 148, 153, 155, 157, 158, 159, 161, 165, 170, 172, 173,
+        175, 176, 177, 178, 184, 186, 187, 189, 190, 191, 194, 195, 196, 199,
+        200, 205, 206, 208, 210, 218, 222, 226, 228, 233, 241, 242, 243, 248,
+    },
+    "edge_wear": {
+        4, 11, 14, 24, 37, 51, 55, 56, 57, 70, 81, 99, 102, 107, 115, 120,
+        128, 133, 141, 146, 158, 166, 170, 174, 177, 184, 191, 194, 200,
+        201, 208, 221, 222, 233, 236,
+    },
+    "tear_missing": {51, 115, 141, 170, 201, 221},
+}
 
 FIELDNAMES = (
     "file",
+    "main_label",
+    "sub_label",
+    "label_path",
     "primary_category",
     "tags",
+    "label_source",
     "scale",
     "distribution",
     "density",
@@ -194,59 +239,61 @@ def extract_features(path: Path) -> Features:
     )
 
 
-def _manual_tags(texture_id: int) -> set[str]:
-    return {
-        category for category, texture_ids in MANUAL_TAGS.items()
+def _manual_primary(texture_id: int) -> str:
+    matches = [
+        sub_label
+        for sub_label, texture_ids in MANUAL_PRIMARY.items()
+        if texture_id in texture_ids
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Texture {texture_id:03d} must have exactly one visual primary "
+            f"label; found {matches}"
+        )
+    return matches[0]
+
+
+def _manual_tags(texture_id: int, primary: str) -> set[str]:
+    tags = {
+        category
+        for category, texture_ids in AUXILIARY_TAGS.items()
         if texture_id in texture_ids
     }
-
-
-def _feature_tags(features: Features) -> set[str]:
-    tags: set[str] = set()
-    if features.coverage <= 0.0015 or features.bright_coverage <= 0.00005:
-        tags.add("reject")
-    if features.edge_bias >= 2.2:
-        tags.add("edge_wear")
-    if features.anisotropy >= 0.16:
-        tags.add("scratch")
-    if features.component_density >= 3200 and features.largest_component < 0.10:
-        tags.add("dust")
-    if features.coverage >= 0.20 and features.coarse_ratio >= 0.20:
-        tags.add("mold")
-    if features.largest_component >= 0.45 and features.coverage >= 0.06:
-        tags.add("stain")
+    tags.add(primary)
     return tags
 
 
-def _fallback_primary(features: Features) -> str:
-    if features.coverage <= 0.0015 or features.bright_coverage <= 0.00005:
-        return "reject"
-    if features.edge_bias >= 2.2:
-        return "edge_wear"
-    if features.anisotropy >= 0.16 and features.coverage < 0.12:
-        return "scratch"
-    if features.largest_component >= 0.45 and features.coverage >= 0.06:
-        return "stain"
-    if features.coverage >= 0.20 or (
-        features.coverage >= 0.11 and features.edge_density >= 0.11
-    ):
-        return "mold"
-    if features.coverage >= 0.020:
-        return "surface_wear"
-    return "mixed"
+def validate_manual_labels(texture_paths: list[Path]) -> None:
+    source_ids = {int(path.stem) for path in texture_paths}
+    mapped_ids: set[int] = set()
+    duplicates: dict[int, list[str]] = {}
+    for sub_label, texture_ids in MANUAL_PRIMARY.items():
+        if sub_label not in CATEGORIES:
+            raise ValueError(f"Unknown manual sub-label: {sub_label}")
+        for texture_id in texture_ids:
+            if texture_id in mapped_ids:
+                duplicates[texture_id] = [
+                    label
+                    for label, ids in MANUAL_PRIMARY.items()
+                    if texture_id in ids
+                ]
+            mapped_ids.add(texture_id)
+    if duplicates:
+        raise ValueError(f"Duplicate visual primary labels: {duplicates}")
+    missing = sorted(source_ids - mapped_ids)
+    extra = sorted(mapped_ids - source_ids)
+    if missing or extra:
+        raise ValueError(
+            f"Visual primary label coverage mismatch; missing={missing}, "
+            f"extra={extra}"
+        )
 
 
 def classify(path: Path, features: Features) -> dict[str, str]:
     texture_id = int(path.stem)
-    manual = _manual_tags(texture_id)
-    measured = _feature_tags(features)
-    tags = manual | measured
-
-    primary = next(
-        (category for category in PRIMARY_PRIORITY if category in manual),
-        _fallback_primary(features),
-    )
-    tags.add(primary)
+    primary = _manual_primary(texture_id)
+    main_label = SUB_LABEL_TO_MAIN[primary]
+    tags = _manual_tags(texture_id, primary)
 
     if primary in {"scratch", "crack", "fold"} or features.anisotropy >= 0.12:
         scale = "linear"
@@ -255,7 +302,7 @@ def classify(path: Path, features: Features) -> dict[str, str]:
     elif features.largest_component >= 0.4 or features.coarse_ratio >= 0.35:
         scale = "coarse"
     else:
-        scale = "mixed"
+        scale = "multi_scale"
 
     if primary in {"edge_wear", "tear_missing"} or features.edge_bias >= 2.0:
         distribution = "edge"
@@ -274,22 +321,26 @@ def classify(path: Path, features: Features) -> dict[str, str]:
         density = "dense"
 
     blend_mode = (
-        "screen" if primary in {"scratch", "dust", "fold"} else "multiply"
+        "screen"
+        if primary in {"scratch", "crack", "dust", "fold"}
+        else "multiply"
     )
-    review_status = "manual" if manual else "auto"
-    confidence = 0.97 if manual else 0.72
 
     return {
         "file": path.name,
+        "main_label": main_label,
+        "sub_label": primary,
+        "label_path": f"{main_label}--{primary}",
         "primary_category": primary,
         "tags": ";".join(sorted(tags)),
+        "label_source": "manual_visual",
         "scale": scale,
         "distribution": distribution,
         "density": density,
         "blend_mode": blend_mode,
-        "confidence": f"{confidence:.2f}",
+        "confidence": "0.97",
         "enabled": "0" if primary == "reject" else "1",
-        "review_status": review_status,
+        "review_status": "manual_visual",
         "coverage": f"{features.coverage:.6f}",
         "bright_coverage": f"{features.bright_coverage:.6f}",
         "edge_bias": f"{features.edge_bias:.4f}",
@@ -345,7 +396,7 @@ def _render_category_sheet(
         )
         sheet.paste(canvas, (x, y))
         label = (
-            f"{row['file']}  {row['review_status']}  "
+            f"{row['file']}  {row['label_path']}  "
             f"cov={float(row['coverage']) * 100:.1f}%"
         )
         draw.text((x, y + image_height + 5), label, fill=(0, 0, 0))
@@ -361,7 +412,7 @@ def render_review_sheets(
     for old in review_dir.glob("category_*.jpg"):
         old.unlink()
     for category in CATEGORIES:
-        selected = [row for row in rows if row["primary_category"] == category]
+        selected = [row for row in rows if row["sub_label"] == category]
         if selected:
             _render_category_sheet(
                 category,
@@ -384,8 +435,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     texture_dir = Path(args.texture_dir)
+    texture_paths = list_texture_paths(texture_dir)
+    validate_manual_labels(texture_paths)
     rows: list[dict[str, str]] = []
-    for index, path in enumerate(list_texture_paths(texture_dir), start=1):
+    for index, path in enumerate(texture_paths, start=1):
         features = extract_features(path)
         rows.append(classify(path, features))
         if index % 25 == 0:
@@ -393,7 +446,7 @@ def main(argv: list[str] | None = None) -> None:
 
     write_catalog(rows, Path(args.output))
     render_review_sheets(rows, texture_dir, Path(args.review_dir))
-    counts = Counter(row["primary_category"] for row in rows)
+    counts = Counter(row["sub_label"] for row in rows)
     print(f"catalog written: {args.output}")
     print(f"review sheets: {args.review_dir}")
     print("category counts:")
