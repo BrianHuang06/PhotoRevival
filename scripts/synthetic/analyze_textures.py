@@ -22,17 +22,11 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
-try:  # pragma: no cover - environment dependent
-    from photo_revival.age_photo import DEFAULT_TEXTURE_DIR, list_texture_paths
-except ImportError:  # pragma: no cover
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-    from photo_revival.age_photo import DEFAULT_TEXTURE_DIR, list_texture_paths
+from scripts.synthetic.texture_assets import DEFAULT_TEXTURE_DIR, list_texture_paths
 
 
 DEFAULT_CATALOG_PATH = Path(__file__).with_name("texture_catalog.csv")
-DEFAULT_REVIEW_DIR = Path("artifacts/texture_analysis/catalog")
+DEFAULT_REVIEW_DIR = Path(__file__).with_name("texture_reviews")
 
 CATEGORIES = (
     "scratch",

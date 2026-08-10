@@ -22,20 +22,19 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-# Make ``photo_revival`` importable without an installed package.
-try:  # pragma: no cover - environment dependent
-    import photo_revival  # noqa: F401
-except ImportError:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
-
 import numpy as np
 from PIL import Image
 
 from scripts.synthetic.engine import (
+    DEFAULT_CATALOG_PATH,
+    SEVERITY_PROFILE,
     DegradationConfig,
+    catalog_sha256,
     coverage_of,
     degrade_target,
     derive_variant_seed,
+    texture_catalog_summary,
+    validate_material_only_metadata,
 )
 from scripts.synthetic import generate as gen
 
@@ -52,11 +51,11 @@ def _args(**overrides) -> SimpleNamespace:
         severities=SEVERITIES,
         min_coverage=1.0,
         max_coverage=35.0,
-        fill_mode="paper",
+        texture_dir=None,
+        texture_catalog=DEFAULT_CATALOG_PATH,
         global_seed=0,
         limit=None,
         sample=None,
-        global_only=False,
         no_collages=False,
         force=False,
         contact_sheet_only=False,
@@ -101,7 +100,6 @@ def main() -> int:
         clean_dir = tmp / "clean"
         clean_dir.mkdir()
         out_dir = tmp / "out"
-        out_global = tmp / "out_global"
         out_sample = tmp / "out_sample"
 
         # 01 - engine + CLI import cleanly
@@ -110,7 +108,10 @@ def main() -> int:
             assert callable(coverage_of), "coverage_of not callable"
             assert callable(gen.generate) and callable(gen.verify), "CLI functions missing"
             assert gen.build_parser(), "parser not constructible"
-            return "engine + CLI importable"
+            summary = texture_catalog_summary()
+            assert summary["total"] == 250, f"catalog total {summary['total']} != 250"
+            assert summary["enabled"] > 0, "catalog has no enabled material"
+            return "engine + CLI importable; 250 materials classified"
 
         # 02 - per-variant seed derivation is stable and distinct
         def check_seed_derivation() -> str:
@@ -181,10 +182,14 @@ def main() -> int:
                 assert mask.size == target.size == degraded.size, f"{row['source_id']}/{row['severity']} size mismatch"
                 values = set(np.asarray(mask).ravel().tolist())
                 assert values.issubset({0, 255}), f"{row['source_id']}/{row['severity']} non-binary mask {values}"
-                if row["restoration_type"] == "local_repair":
-                    assert max(values) == 255, f"{row['source_id']}/{row['severity']} empty local-repair mask"
+                assert row["restoration_type"] == "local_repair", (
+                    f"{row['source_id']}/{row['severity']} must be local_repair"
+                )
+                assert max(values) == 255, (
+                    f"{row['source_id']}/{row['severity']} empty material mask"
+                )
                 mask.close(); target.close(); degraded.close()
-            return f"{len(manifest)} masks: L mode, binary, size-matched"
+            return f"{len(manifest)} material masks: L mode, binary, non-empty"
 
         # 08 - coverage within configured bounds and consistent with metadata
         def check_coverage() -> str:
@@ -194,17 +199,22 @@ def main() -> int:
                 recomputed = coverage_of(mask)
                 recorded = float(row["mask_coverage"])
                 assert abs(recomputed - recorded) <= 0.5, f"{row['source_id']}/{row['severity']} cov {recomputed:.2f} != {recorded:.2f}"
-                if row["restoration_type"] == "local_repair":
-                    assert 0.5 <= recomputed <= 35.5, f"{row['source_id']}/{row['severity']} cov {recomputed:.2f} out of [1,35]"
+                lo, hi = SEVERITY_PROFILE[row["severity"]]["coverage_target"]
+                assert lo - 0.5 <= recomputed <= hi + 0.5, (
+                    f"{row['source_id']}/{row['severity']} cov "
+                    f"{recomputed:.2f} out of [{lo},{hi}]"
+                )
                 mask.close()
-            return "all coverage in [1,35] and matches metadata"
+            return "coverage matches each light/medium/heavy material profile"
 
         # 09 - metadata schema completeness
         def check_metadata() -> str:
             # single metadata/<source_id>.json per source holding every severity variant
             manifest = gen.read_csv(out_dir / "manifest.csv")
-            sources_checked = 0
-            for row in manifest:
+            source_ids = sorted({row["source_id"] for row in manifest})
+            expected_sha = catalog_sha256()
+            for source_id in source_ids:
+                row = next(row for row in manifest if row["source_id"] == source_id)
                 meta = json.loads((out_dir / row["metadata_path"]).read_text(encoding="utf-8"))
                 assert meta.get("source_id") == row["source_id"]
                 variants = meta.get("variants", {})
@@ -214,25 +224,47 @@ def main() -> int:
                     for key in ("seed", "severity", "restoration_type", "mask_coverage", "image_size", "steps"):
                         assert key in variant_meta, f"{row['source_id']}/{sev} missing metadata.{key}"
                     assert variant_meta["severity"] == sev
-                    assert variant_meta["steps"], f"{row['source_id']}/{sev} has no steps"
-                    assert all("op" in s and "params" in s for s in variant_meta["steps"])
-                sources_checked += 1
-            return f"{sources_checked} sources: single metadata file with all variants"
+                    assert variant_meta["restoration_type"] == "local_repair"
+                    assert variant_meta["generation_mode"] == "material_only"
+                    material_errors = validate_material_only_metadata(variant_meta)
+                    assert not material_errors, (
+                        f"{row['source_id']}/{sev}: {material_errors}"
+                    )
+                    assert variant_meta["material_catalog"]["sha256"] == expected_sha
+                    expected_groups = [
+                        slot["group"] for slot in SEVERITY_PROFILE[sev]["slots"]
+                    ]
+                    recipe_groups = [
+                        item["group"] for item in variant_meta["category_recipe"]
+                    ]
+                    assert recipe_groups == expected_groups
+                    assert len(variant_meta["steps"]) == len(expected_groups)
+                    assert all(
+                        step["op"] == "texture_composite"
+                        for step in variant_meta["steps"]
+                    )
+            return f"{len(source_ids)} sources: strict material metadata complete"
 
-        # 10 - global-only mode
-        def check_global_only() -> str:
-            args = _args(clean_dir=str(clean_dir), output_dir=str(out_global), limit=2, global_only=True)
-            sources = gen._select_sources(clean_dir, None, 2)
-            gen.generate(args, sources, out_global)
-            manifest = gen.read_csv(out_global / "manifest.csv")
-            assert len(manifest) == 6
-            assert all(r["restoration_type"] == "global_restoration" for r in manifest)
+        # 10 - strict material boundary: no changes outside the material mask
+        def check_material_only_boundary() -> str:
+            manifest = gen.read_csv(out_dir / "manifest.csv")
+            changed_inside = 0
             for row in manifest:
-                mask = Image.open(out_global / row["mask_path"])
-                assert set(np.asarray(mask).ravel().tolist()) == {0}, f"{row['source_id']}/{row['severity']} expected empty mask"
-                mask.close()
-            gen.verify(_args(output_dir=str(out_global)), out_global)
-            return "global-only: 6 variants, empty masks, verified"
+                with Image.open(out_dir / row["target_path"]) as opened:
+                    target = np.asarray(opened.convert("RGB"))
+                with Image.open(out_dir / row["degraded_path"]) as opened:
+                    degraded = np.asarray(opened.convert("RGB"))
+                with Image.open(out_dir / row["mask_path"]) as opened:
+                    mask = np.asarray(opened.convert("L")) > 0
+                assert mask.any(), f"{row['source_id']}/{row['severity']} empty mask"
+                assert np.array_equal(target[~mask], degraded[~mask]), (
+                    f"{row['source_id']}/{row['severity']} changed outside mask"
+                )
+                assert np.any(target[mask] != degraded[mask]), (
+                    f"{row['source_id']}/{row['severity']} no material change inside mask"
+                )
+                changed_inside += 1
+            return f"{changed_inside} variants: outside-mask pixels unchanged exactly"
 
         # 11 - sample mode (pre-batch deliverable for D)
         def check_sample() -> str:
@@ -298,8 +330,6 @@ def main() -> int:
         # 16 - real CLI invocation works via python -m
         def check_cli_subprocess() -> str:
             env = dict(os.environ)
-            src = str(Path(__file__).resolve().parents[2] / "src")
-            env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
             sub = str(tmp / "sub_fixture")
             result = subprocess.run(
                 [sys.executable, "-m", "scripts.synthetic.generate",
@@ -320,7 +350,7 @@ def main() -> int:
             ("07 mask properties", check_mask_properties),
             ("08 coverage bounds", check_coverage),
             ("09 metadata schema", check_metadata),
-            ("10 global-only mode", check_global_only),
+            ("10 material-only boundary", check_material_only_boundary),
             ("11 sample mode", check_sample),
             ("12 idempotent rerun", check_idempotent),
             ("13 manifest filtering", check_manifest_filter),

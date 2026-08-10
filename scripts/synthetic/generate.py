@@ -6,12 +6,13 @@ target images into paired training data. For every clean image it writes:
     target/<source_id>.png
     degraded/<source_id>_<severity>.png
     masks/<source_id>_<severity>.png        # 0 = clean, 255 = damaged
-    metadata/<source_id>_<severity>.json    # seed + every applied step/param
+    metadata/<source_id>.json               # all severities + material records
 
 plus a manifest.csv, summary.json and per-source comparison collages. The
-local-damage mask is derived from the damage layer alpha channel, never from a
-detector prediction. All randomness comes from a single per-variant numpy
-Generator so every variant is reproducible from the seed recorded in metadata.
+damage mask is derived from cataloged texture material pixels, never from a
+detector prediction. No procedural aging operation is allowed. All randomness
+comes from a single per-variant numpy Generator so every variant is
+reproducible from the seed recorded in metadata.
 
 Usage (from the repo root):
 
@@ -32,34 +33,40 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-# Make ``photo_revival`` importable even when the package is not installed.
-try:  # pragma: no cover - environment dependent
-    import photo_revival  # noqa: F401
-except ImportError:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
-
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
-from photo_revival.paths import DATA_DIR
 from scripts.synthetic.engine import (
+    DEFAULT_CATALOG_PATH,
+    SEVERITY_PROFILE,
     DegradationConfig,
     build_source_collage,
+    catalog_sha256,
     coverage_of,
     degrade_target,
     derive_variant_seed,
+    load_texture_catalog,
     save_variant_files,
+    texture_catalog_summary,
+    validate_material_only_metadata,
     write_source_metadata,
 )
+from scripts.synthetic.texture_assets import PROJECT_ROOT
+
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 from scripts.data.team_dataset_workflow import (
     IMAGE_SUFFIXES,
-    create_contact_sheet,
     read_csv,
     sha256,
     utc_now,
     write_csv,
     write_json,
 )
+
+DATA_DIR = PROJECT_ROOT / "data"
 
 SYNTHETIC_MANIFEST_FIELDS = [
     "source_id", "severity", "seed", "restoration_type", "mask_coverage",
@@ -69,6 +76,50 @@ SYNTHETIC_MANIFEST_FIELDS = [
 
 DEFAULT_FIXTURE_DIR = Path("artifacts/synthetic_fixture/clean")
 FIXTURE_SIZES = [(512, 384), (320, 240), (256, 256)]
+
+
+def create_review_contact_sheet(
+    paths: list[Path],
+    output: Path,
+    sample_size: int = 36,
+) -> None:
+    """Render wide comparison collages at a legible two-column review size."""
+    if not paths:
+        return
+    selected = paths[:sample_size]
+    columns = min(2, len(selected))
+    cell_width, cell_height, label_height, padding = 620, 300, 28, 12
+    rows = (len(selected) + columns - 1) // columns
+    sheet = Image.new(
+        "RGB",
+        (
+            columns * cell_width + (columns + 1) * padding,
+            rows * (cell_height + label_height) + (rows + 1) * padding,
+        ),
+        "white",
+    )
+    draw = ImageDraw.Draw(sheet)
+    for index, path in enumerate(selected):
+        with Image.open(path) as opened:
+            image = ImageOps.exif_transpose(opened).convert("RGB")
+            image.thumbnail(
+                (cell_width - 2 * padding, cell_height - 2 * padding),
+                Image.Resampling.LANCZOS,
+            )
+        column = index % columns
+        row = index // columns
+        cell_x = padding + column * cell_width
+        cell_y = padding + row * (cell_height + label_height)
+        image_x = cell_x + (cell_width - image.width) // 2
+        image_y = cell_y + (cell_height - image.height) // 2
+        sheet.paste(image, (image_x, image_y))
+        draw.text(
+            (cell_x + 4, cell_y + cell_height + 4),
+            path.stem[:72],
+            fill="black",
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output, "JPEG", quality=92)
 
 
 def _git_commit() -> str:
@@ -169,11 +220,10 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
     cfg = DegradationConfig(
         min_coverage=args.min_coverage,
         max_coverage=args.max_coverage,
-        fill_mode=args.fill_mode,
-        global_enabled=True,
-        local_enabled=not args.global_only,
-        imaging_enabled=True,
+        texture_dir=Path(args.texture_dir) if args.texture_dir else None,
+        catalog_path=Path(args.texture_catalog) if args.texture_catalog else None,
     )
+    catalog_summary = texture_catalog_summary(cfg.texture_dir, cfg.catalog_path)
 
     target_dir = output_root / "target"
     degraded_dir = output_root / "degraded"
@@ -272,7 +322,9 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
 
     collage_paths = sorted(collages_dir.glob("*_comparison.png"))
     if collage_paths:
-        create_contact_sheet(collage_paths, output_root / "contact_sheet.jpg")
+        create_review_contact_sheet(
+            collage_paths, output_root / "contact_sheet.jpg"
+        )
 
     if args.sample:
         # processed_sources lists one entry per variant; take the first N distinct sources
@@ -288,7 +340,7 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
         ]
         write_csv(output_root / "sample_manifest.csv", sample_rows, SYNTHETIC_MANIFEST_FIELDS)
         if collage_paths:
-            create_contact_sheet(
+            create_review_contact_sheet(
                 collage_paths[: args.sample], output_root / "contact_sheet_sample.jpg"
             )
 
@@ -296,6 +348,7 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
     summary = {
         "command": " ".join(sys.argv),
         "global_seed": args.global_seed,
+        "generation_mode": "material_only",
         "created_at": utc_now(),
         "git_commit": _git_commit(),
         "versions": {
@@ -310,6 +363,7 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
         "coverage": coverage_summary,
         "restoration_types": dict(restoration_counter),
         "ops_used": dict(ops_counter),
+        "material_catalog": catalog_summary,
         "warnings": cfg.warnings,
     }
     write_json(output_root / "summary.json", summary)
@@ -357,7 +411,7 @@ def rebuild_contact_sheet(args: argparse.Namespace, output_root: Path) -> None:
     if not collages:
         print("no collages found; nothing to rebuild")
         return
-    create_contact_sheet(collages, output_root / "contact_sheet.jpg")
+    create_review_contact_sheet(collages, output_root / "contact_sheet.jpg")
     print(f"contact sheet rebuilt: {output_root / 'contact_sheet.jpg'}")
 
 
@@ -366,6 +420,21 @@ def verify(args: argparse.Namespace, output_root: Path) -> None:
     output_root = Path(output_root)
     errors: list[str] = []
     warnings: list[str] = []
+    rows: list[dict] = []
+    verify_cfg = DegradationConfig(
+        min_coverage=args.min_coverage,
+        max_coverage=args.max_coverage,
+        texture_dir=Path(args.texture_dir) if args.texture_dir else None,
+        catalog_path=Path(args.texture_catalog) if args.texture_catalog else None,
+    )
+    expected_catalog_sha = catalog_sha256(verify_cfg.catalog_path)
+    catalog_records = {
+        record.file: record
+        for record in load_texture_catalog(
+            verify_cfg.texture_dir,
+            verify_cfg.catalog_path,
+        )
+    }
     manifest_path = output_root / "manifest.csv"
     if not manifest_path.is_file():
         errors.append("manifest.csv missing")
@@ -396,6 +465,7 @@ def verify(args: argparse.Namespace, output_root: Path) -> None:
 
             degraded_size = None
             saved_mask = None
+            saved_degraded = None
             with Image.open(target_path) as target_img, \
                  Image.open(degraded_path) as degraded_img, \
                  Image.open(mask_path) as mask_img:
@@ -410,27 +480,45 @@ def verify(args: argparse.Namespace, output_root: Path) -> None:
                     non_binary = sorted(v for v in mask_values if v not in (0, 255))[:5]
                     errors.append(f"{source_id}/{severity}: mask has non-binary values {non_binary}")
                 restored_type = row["restoration_type"]
-                if restored_type == "local_repair" and max(mask_values) == 0:
-                    errors.append(f"{source_id}/{severity}: empty mask for local_repair sample")
-                if restored_type == "global_restoration" and max(mask_values) != 0:
-                    errors.append(f"{source_id}/{severity}: non-empty mask for global_restoration sample")
+                if restored_type != "local_repair":
+                    errors.append(
+                        f"{source_id}/{severity}: restoration_type must be local_repair"
+                    )
+                if not mask_values or max(mask_values) == 0:
+                    errors.append(f"{source_id}/{severity}: material mask is empty")
+                mask_array = np.asarray(mask_img)
+                target_array = np.asarray(target_img.convert("RGB"))
+                degraded_array = np.asarray(degraded_img.convert("RGB"))
+                damaged = mask_array > 0
+                if damaged.any():
+                    if np.any(target_array[~damaged] != degraded_array[~damaged]):
+                        errors.append(
+                            f"{source_id}/{severity}: pixels changed outside material mask"
+                        )
+                    if not np.any(target_array[damaged] != degraded_array[damaged]):
+                        errors.append(
+                            f"{source_id}/{severity}: material mask contains no changed pixels"
+                        )
                 recomputed = coverage_of(mask_img)
                 degraded_size = degraded_img.size
-                saved_mask = np.asarray(mask_img)
+                saved_mask = mask_array.copy()
+                saved_degraded = degraded_array.copy()
+            if sha256(degraded_path) != row.get("sha256_degraded"):
+                errors.append(f"{source_id}/{severity}: degraded SHA-256 mismatch")
             recorded = float(row["mask_coverage"])
             if abs(recomputed - recorded) > 0.5:
                 errors.append(
                     f"{source_id}/{severity}: recomputed coverage {recomputed:.2f} "
                     f"!= recorded {recorded:.2f}"
                 )
-            if restored_type == "local_repair":
-                lo = args.min_coverage - 0.5
-                hi = args.max_coverage + 0.5
-                if not (lo <= recomputed <= hi):
-                    errors.append(
-                        f"{source_id}/{severity}: coverage {recomputed:.2f} outside "
-                        f"[{lo:.2f}, {hi:.2f}]"
-                    )
+            profile_lo, profile_hi = SEVERITY_PROFILE[severity]["coverage_target"]
+            lo = max(args.min_coverage, profile_lo) - 0.5
+            hi = min(args.max_coverage, profile_hi) + 0.5
+            if not (lo <= recomputed <= hi):
+                errors.append(
+                    f"{source_id}/{severity}: coverage {recomputed:.2f} outside "
+                    f"severity target [{lo:.2f}, {hi:.2f}]"
+                )
 
             metadata = json.loads(meta_path.read_text(encoding="utf-8"))
             variant_meta = metadata.get("variants", {}).get(severity)
@@ -443,33 +531,76 @@ def verify(args: argparse.Namespace, output_root: Path) -> None:
                     errors.append(f"{source_id}/{severity}: metadata seed mismatch")
                 if variant_meta.get("restoration_type") != restored_type:
                     errors.append(f"{source_id}/{severity}: metadata restoration_type mismatch")
+                for material_error in validate_material_only_metadata(variant_meta):
+                    errors.append(
+                        f"{source_id}/{severity}: material metadata {material_error}"
+                    )
+                material_catalog = variant_meta.get("material_catalog") or {}
+                if material_catalog.get("sha256") != expected_catalog_sha:
+                    errors.append(f"{source_id}/{severity}: material catalog hash mismatch")
                 steps = variant_meta.get("steps") or []
                 if not steps:
                     errors.append(f"{source_id}/{severity}: metadata has no steps")
                 for step in steps:
                     if "op" not in step or "params" not in step:
                         errors.append(f"{source_id}/{severity}: malformed step entry")
+                        continue
+                    params = step["params"]
+                    texture_name = params.get("texture")
+                    record = catalog_records.get(texture_name)
+                    if record is None or not record.enabled:
+                        errors.append(
+                            f"{source_id}/{severity}: unapproved material "
+                            f"{texture_name!r}"
+                        )
+                    elif (
+                        params.get("category") != record.primary_category
+                        or params.get("blend_mode") != record.blend_mode
+                    ):
+                        errors.append(
+                            f"{source_id}/{severity}: material catalog fields "
+                            f"do not match {texture_name}"
+                        )
                 size = variant_meta.get("image_size")
                 if degraded_size is not None and size != list(degraded_size):
                     errors.append(f"{source_id}/{severity}: metadata image_size mismatch")
+                expected_groups = [
+                    slot["group"] for slot in SEVERITY_PROFILE[severity]["slots"]
+                ]
+                actual_recipe = variant_meta.get("category_recipe") or []
+                actual_groups = [item.get("group") for item in actual_recipe]
+                if actual_groups != expected_groups:
+                    errors.append(
+                        f"{source_id}/{severity}: category recipe groups "
+                        f"{actual_groups} != {expected_groups}"
+                    )
+                if len(steps) != len(expected_groups):
+                    errors.append(
+                        f"{source_id}/{severity}: expected {len(expected_groups)} "
+                        f"material steps, got {len(steps)}"
+                    )
 
             # reproduction spot check (first variant only) - strongest guarantee
-            if not reproduction_checked and restored_type == "local_repair":
+            if not reproduction_checked:
                 try:
                     with Image.open(target_path) as target_img:
                         target_image = target_img.convert("RGB")
                     seed = int(row["seed"])
                     variant = degrade_target(
                         target_image, severity, seed,
-                        DegradationConfig(
-                            min_coverage=args.min_coverage,
-                            max_coverage=args.max_coverage,
-                            fill_mode=args.fill_mode,
-                        ),
+                        verify_cfg,
                     )
                     regenerated = np.asarray(variant.mask)
                     if saved_mask is None or not np.array_equal(regenerated, saved_mask):
                         errors.append(f"{source_id}/{severity}: reproduction mask mismatch")
+                    regenerated_image = np.asarray(variant.degraded)
+                    if (
+                        saved_degraded is None
+                        or not np.array_equal(regenerated_image, saved_degraded)
+                    ):
+                        errors.append(
+                            f"{source_id}/{severity}: reproduction image mismatch"
+                        )
                     reproduction_checked = True
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"reproduction check failed: {exc}")
@@ -507,13 +638,22 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=["light", "medium", "heavy"])
     parser.add_argument("--min-coverage", type=float, default=1.0)
     parser.add_argument("--max-coverage", type=float, default=35.0)
-    parser.add_argument("--fill-mode", default="paper", choices=["paper", "blurred_patch"])
+    parser.add_argument(
+        "--texture-dir",
+        type=Path,
+        default=None,
+        help="source texture directory (default: project Resource Boy pack)",
+    )
+    parser.add_argument(
+        "--texture-catalog",
+        type=Path,
+        default=DEFAULT_CATALOG_PATH,
+        help="classified material catalog CSV",
+    )
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--limit", type=int, default=None, help="process first N sources")
     parser.add_argument("--sample", type=int, default=None,
                         help="like --limit but also writes sample_manifest.csv + sample contact sheet")
-    parser.add_argument("--global-only", action="store_true",
-                        help="emit global-only variants (empty masks, global_restoration)")
     parser.add_argument("--no-collages", action="store_true")
     parser.add_argument("--force", action="store_true", help="overwrite existing variants")
     parser.add_argument("--contact-sheet-only", action="store_true")
