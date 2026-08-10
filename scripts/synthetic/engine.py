@@ -1,18 +1,21 @@
-"""Synthetic degradation engine for building reproducible paired datasets.
+"""Texture-driven synthetic degradation engine for building paired datasets.
 
 This module generates light/medium/heavy degraded variants of a clean target
-image. It separates degradation into three recorded layers:
+image. Degradation is separated into three recorded layers:
 
 - GLOBAL   : fade, color cast, contrast, gamma, vignette, uneven exposure.
-- LOCAL    : scratch, crack, fold, dust, stain, mold, tear, missing region,
-             drawn onto a transparent RGBA damage overlay. The overlay alpha
-             becomes the repair mask (0 = clean, 255 = damaged). Masks never
-             come from a detector prediction.
+- LOCAL    : damage patterns sampled from the project's real grunge texture
+             materials (``data/textures/.../Resource Boy - Grunge Textures``),
+             plus structural shapes (fold, tear, missing region). All of it is
+             composed onto a transparent RGBA damage overlay whose alpha becomes
+             the repair mask (0 = clean, 255 = damaged). Masks never come from
+             a detector prediction and no texture is invented procedurally.
 - IMAGING  : blur, film grain, Poisson noise, scan noise, downscale, JPEG.
 
 Every variant is reproducible: it consumes a single numpy Generator seeded by
-the variant seed, and every applied operation is recorded with its parameters
-in the metadata dict returned alongside the degraded image and mask.
+the variant seed, and every applied operation (including which texture files
+were used and how they were sampled) is recorded in the metadata dict returned
+alongside the degraded image and mask.
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
+from photo_revival.age_photo import DEFAULT_TEXTURE_DIR, list_texture_paths
+
 try:
     from PIL import __version__ as PILLOW_VERSION
 except ImportError:  # pragma: no cover - very old Pillow fallback
@@ -37,8 +42,13 @@ except ImportError:  # pragma: no cover - very old Pillow fallback
 # Severity profiles
 # --------------------------------------------------------------------------
 
-# Each value is a (lo, hi) tuple sampled uniformly per variant. ``coverage_target``
-# is the target local-mask coverage percent window for that severity.
+# ``coverage_target`` is the target local-mask coverage percent window.
+# ``texture`` controls how the real texture materials are applied:
+#   count       - number of distinct textures sampled
+#   opacity     - alpha strength of the damage stamp
+#   edge_wear   - how much damage concentrates toward corners/edges (0..1)
+#   darken      - how much the texture's own colors are darkened (stain-like)
+#   target_cov  - per-texture-layer coverage target (%)
 SEVERITY_PROFILE: dict[str, dict] = {
     "light": {
         "global": {
@@ -49,13 +59,15 @@ SEVERITY_PROFILE: dict[str, dict] = {
             "vignette": {"strength": (0.10, 0.22)},
             "uneven_exposure": {"strength": (0.04, 0.09)},
         },
-        "local": {
-            "scratch": {"count": (1, 2)},
-            "crack": {"count": (0, 1)},
+        "texture": {
+            "count": (1, 1),
+            "opacity": (0.40, 0.60),
+            "edge_wear": (0.30, 0.50),
+            "darken": (0.05, 0.15),
+            "target_cov": (2.0, 5.0),
+        },
+        "structural": {
             "fold": {"count": (0, 1)},
-            "dust": {"count": (15, 45)},
-            "stain": {"count": (0, 1)},
-            "mold": {"count": (0, 1)},
             "tear": {"count": (0, 0)},
             "missing_region": {"count": (0, 0)},
         },
@@ -78,13 +90,15 @@ SEVERITY_PROFILE: dict[str, dict] = {
             "vignette": {"strength": (0.20, 0.36)},
             "uneven_exposure": {"strength": (0.08, 0.16)},
         },
-        "local": {
-            "scratch": {"count": (2, 4)},
-            "crack": {"count": (0, 2)},
-            "fold": {"count": (0, 2)},
-            "dust": {"count": (30, 90)},
-            "stain": {"count": (1, 2)},
-            "mold": {"count": (1, 3)},
+        "texture": {
+            "count": (1, 2),
+            "opacity": (0.55, 0.75),
+            "edge_wear": (0.50, 0.70),
+            "darken": (0.10, 0.25),
+            "target_cov": (8.0, 14.0),
+        },
+        "structural": {
+            "fold": {"count": (0, 1)},
             "tear": {"count": (0, 1)},
             "missing_region": {"count": (0, 1)},
         },
@@ -107,13 +121,15 @@ SEVERITY_PROFILE: dict[str, dict] = {
             "vignette": {"strength": (0.32, 0.50)},
             "uneven_exposure": {"strength": (0.12, 0.22)},
         },
-        "local": {
-            "scratch": {"count": (4, 7)},
-            "crack": {"count": (1, 3)},
-            "fold": {"count": (1, 3)},
-            "dust": {"count": (60, 150)},
-            "stain": {"count": (2, 4)},
-            "mold": {"count": (3, 6)},
+        "texture": {
+            "count": (2, 3),
+            "opacity": (0.70, 0.90),
+            "edge_wear": (0.70, 0.90),
+            "darken": (0.20, 0.35),
+            "target_cov": (15.0, 22.0),
+        },
+        "structural": {
+            "fold": {"count": (1, 2)},
             "tear": {"count": (1, 2)},
             "missing_region": {"count": (1, 2)},
         },
@@ -129,16 +145,6 @@ SEVERITY_PROFILE: dict[str, dict] = {
     },
 }
 
-LOCAL_TYPES = ["scratch", "crack", "fold", "dust", "stain", "mold", "tear", "missing_region"]
-
-# Weighted type-selection bias per severity. Heavier severities increasingly
-# include content-bearing types (tear, missing_region).
-TYPE_WEIGHTS: dict[str, dict[str, int]] = {
-    "light": {"scratch": 4, "crack": 1, "fold": 1, "dust": 4, "stain": 2, "mold": 1, "tear": 0, "missing_region": 0},
-    "medium": {"scratch": 4, "crack": 3, "fold": 2, "dust": 4, "stain": 3, "mold": 2, "tear": 2, "missing_region": 1},
-    "heavy": {"scratch": 4, "crack": 3, "fold": 3, "dust": 4, "stain": 4, "mold": 3, "tear": 3, "missing_region": 3},
-}
-
 # Colors used for the color-cast pass (warm paper, cool scan, greenish, etc.).
 CAST_COLORS: list[tuple[int, int, int]] = [
     (250, 244, 220),
@@ -148,6 +154,11 @@ CAST_COLORS: list[tuple[int, int, int]] = [
 ]
 
 SEVERITY_ORDER = {"light": 1, "medium": 2, "heavy": 3}
+
+# Structural damage is drawn as shapes (a fold band, an edge tear, a missing
+# region). Texture-like damage (scratch/stain/mold/dust/edge wear) comes from
+# the real texture materials in ``_texture_damage_layer``, never drawn here.
+STRUCTURAL_TYPES = ["fold", "tear", "missing_region"]
 
 
 # --------------------------------------------------------------------------
@@ -186,6 +197,7 @@ class DegradationConfig:
     min_coverage: float = 1.0
     max_coverage: float = 35.0
     fill_mode: str = "paper"  # "paper" | "blurred_patch"
+    texture_dir: Path | None = None  # default: age_photo.DEFAULT_TEXTURE_DIR
     max_adapt_rounds: int = 8
     global_enabled: bool = True
     local_enabled: bool = True
@@ -272,80 +284,90 @@ def _drop_largest_element(
 
 
 # --------------------------------------------------------------------------
-# Local damage drawing (RGBA overlay; alpha becomes the mask)
+# Texture-driven local damage
+# --------------------------------------------------------------------------
+
+def _fit_texture(texture: Image.Image, rng: np.random.Generator, width: int, height: int) -> np.ndarray:
+    """Crop (or tile) a texture to the target size; returns float32 RGB (H,W,3)."""
+    texture_width, texture_height = texture.size
+    if texture_width >= width and texture_height >= height:
+        x0 = _randint(rng, 0, texture_width - width)
+        y0 = _randint(rng, 0, texture_height - height)
+        cropped = texture.crop((x0, y0, x0 + width, y0 + height))
+        return np.asarray(cropped, dtype=np.float32)
+    source = np.asarray(texture.convert("RGB"), dtype=np.float32)
+    repeat_y = (height + texture_height - 1) // texture_height
+    repeat_x = (width + texture_width - 1) // texture_width
+    tiled = np.tile(source, (repeat_y, repeat_x, 1))[:height, :width]
+    return tiled
+
+
+def _texture_damage_layer(
+    texture_path: Path,
+    rng: np.random.Generator,
+    width: int,
+    height: int,
+    opacity: float,
+    target_cov: float,
+    edge_wear: float,
+    darken: float,
+) -> tuple[dict, np.ndarray]:
+    """Stamp one real texture onto an RGBA damage layer (alpha becomes the mask).
+
+    A quantile threshold picks which texture pixels count as damage so each
+    layer's coverage lands near ``target_cov`` regardless of texture content.
+    The texture's own RGB (darkened) provides the visible damage color, and
+    ``edge_wear`` boosts damage toward corners/edges like a real old print.
+    """
+    rgb = _fit_texture(Image.open(texture_path).convert("RGB"), rng, width, height)
+    gray = rgb.mean(axis=2)
+
+    yy, xx = np.mgrid[:height, :width].astype(np.float32)
+    cx, cy = width / 2.0, height / 2.0
+    d2 = (xx - cx) ** 2 + (yy - cy) ** 2
+    max_d2 = max(cx * cx + cy * cy, 1.0)
+    edge_boost = 1.0 + edge_wear * (d2 / max_d2)  # 1.0 at center -> 1+edge_wear at corners
+
+    quantile = max(0.0, 1.0 - target_cov / 100.0)
+    threshold = float(np.quantile(gray, quantile))
+    if threshold >= 254.0:
+        strength = np.zeros((height, width), dtype=np.float32)
+    else:
+        strength = np.clip((gray - threshold) / (254.0 - threshold), 0.0, 1.0)
+
+    alpha = np.clip(strength * edge_boost * opacity * 255.0, 0, 255).astype(np.uint8)
+    color = np.clip(rgb * (1.0 - darken), 0, 255).astype(np.uint8)
+    overlay = np.dstack([color, alpha])
+
+    params = {
+        "texture": Path(texture_path).name,
+        "opacity": round(opacity, 3),
+        "coverage_target": round(target_cov, 2),
+        "threshold": round(threshold, 1),
+        "edge_wear": round(edge_wear, 3),
+        "darken": round(darken, 3),
+    }
+    return params, overlay
+
+
+def _sample_texture_paths(
+    rng: np.random.Generator, texture_paths: list[Path], count: int
+) -> list[Path]:
+    """Pick ``count`` distinct textures deterministically (numpy rng only)."""
+    pool = list(texture_paths)
+    count = max(0, min(count, len(pool)))
+    if count == 0:
+        return []
+    indices = rng.choice(len(pool), size=count, replace=False)
+    return [pool[int(index)] for index in indices]
+
+
+# --------------------------------------------------------------------------
+# Structural local damage (shapes, not textures)
 # --------------------------------------------------------------------------
 
 def _blank_layer(width: int, height: int) -> Image.Image:
     return Image.new("RGBA", (width, height), (0, 0, 0, 0))
-
-
-def draw_scratch(rng: np.random.Generator, width: int, height: int, count: int):
-    layer = _blank_layer(width, height)
-    draw = ImageDraw.Draw(layer)
-    s = min(width, height)
-    entries = []
-    for _ in range(count):
-        x0 = _randint(rng, int(0.1 * width), int(0.9 * width))
-        y0 = _randint(rng, int(0.1 * height), int(0.9 * height))
-        angle = _randfloat(rng, 0.0, math.pi)
-        length = int(s * _randfloat(rng, 0.1, 0.5))
-        x1 = max(0, min(width - 1, x0 + int(math.cos(angle) * length)))
-        y1 = max(0, min(height - 1, y0 + int(math.sin(angle) * length)))
-        line_width = _randint(rng, 1, 3)
-        value = _randint(rng, 30, 80)
-        alpha = _randint(rng, 160, 255)
-        steps = _randint(rng, 2, 4)
-        points = [(x0, y0)]
-        for i in range(1, steps + 1):
-            points.append(
-                (
-                    x0 + (x1 - x0) * i // steps + _randint(rng, -2, 2),
-                    y0 + (y1 - y0) * i // steps + _randint(rng, -2, 2),
-                )
-            )
-        points.append((x1, y1))
-        draw.line(points, fill=(value, value, value, alpha), width=line_width, joint="curve")
-        entries.append({
-            "start": [x0, y0],
-            "end": [x1, y1],
-            "width": line_width,
-            "value": value,
-            "alpha": alpha,
-            "points": points,
-        })
-    return {"count": count, "scratches": entries}, np.asarray(layer), None
-
-
-def draw_crack(rng: np.random.Generator, width: int, height: int, count: int):
-    layer = _blank_layer(width, height)
-    draw = ImageDraw.Draw(layer)
-    s = min(width, height)
-    entries = []
-    for _ in range(count):
-        x0 = _randint(rng, int(0.15 * width), int(0.85 * width))
-        y0 = _randint(rng, int(0.15 * height), int(0.85 * height))
-        value = _randint(rng, 10, 40)
-        alpha = _randint(rng, 200, 255)
-        vertices = [(x0, y0)]
-        segments = _randint(rng, 3, 6)
-        for _ in range(segments):
-            vertices.append(
-                (
-                    max(0, min(width - 1, vertices[-1][0] + _randint(rng, -int(0.25 * s), int(0.25 * s)))),
-                    max(0, min(height - 1, vertices[-1][1] + _randint(rng, -int(0.25 * s), int(0.25 * s)))),
-                )
-            )
-        line_width = max(1, _randint(rng, 1, 2))
-        draw.line(vertices, fill=(value, value, value, alpha), width=line_width)
-        # one thinner branch off a random vertex
-        branch_from = vertices[_randint(rng, 0, len(vertices) - 1)]
-        branch_end = (
-            max(0, min(width - 1, branch_from[0] + _randint(rng, -int(0.2 * s), int(0.2 * s)))),
-            max(0, min(height - 1, branch_from[1] + _randint(rng, -int(0.2 * s), int(0.2 * s)))),
-        )
-        draw.line([branch_from, branch_end], fill=(value, value, value, alpha), width=1)
-        entries.append({"vertices": vertices, "branch": [branch_from, branch_end], "width": line_width, "value": value, "alpha": alpha})
-    return {"count": count, "cracks": entries}, np.asarray(layer), None
 
 
 def draw_fold(rng: np.random.Generator, width: int, height: int, count: int):
@@ -371,80 +393,6 @@ def draw_fold(rng: np.random.Generator, width: int, height: int, count: int):
             draw.line([p1, p2], fill=(value, value, value, alpha), width=dw)
         entries.append({"p1": list(p1), "p2": list(p2), "width": band_width, "value": value, "alpha": alpha})
     return {"count": count, "folds": entries}, np.asarray(layer), None
-
-
-def draw_dust(rng: np.random.Generator, width: int, height: int, count: int):
-    layer = _blank_layer(width, height)
-    draw = ImageDraw.Draw(layer)
-    radius = _randint(rng, 1, 3)
-    value_lo, value_hi = (30, 90) if rng.random() < 0.5 else (160, 245)
-    alpha_lo, alpha_hi = 120, 255
-    for _ in range(count):
-        x = _randint(rng, 0, width - 1)
-        y = _randint(rng, 0, height - 1)
-        value = _randint(rng, value_lo, value_hi)
-        alpha = _randint(rng, alpha_lo, alpha_hi)
-        if radius == 1:
-            draw.point((x, y), fill=(value, value, value, alpha))
-        else:
-            draw.ellipse(
-                [x - radius, y - radius, x + radius, y + radius],
-                fill=(value, value, value, alpha),
-            )
-    return {
-        "count": count,
-        "radius": radius,
-        "value_range": [value_lo, value_hi],
-        "alpha_range": [alpha_lo, alpha_hi],
-    }, np.asarray(layer), None
-
-
-def draw_stain(rng: np.random.Generator, width: int, height: int, count: int):
-    layer = _blank_layer(width, height)
-    draw = ImageDraw.Draw(layer)
-    s = min(width, height)
-    entries = []
-    for _ in range(count):
-        cx = _randint(rng, int(0.15 * width), int(0.85 * width))
-        cy = _randint(rng, int(0.15 * height), int(0.85 * height))
-        rx = _randint(rng, int(0.03 * s), int(0.12 * s))
-        ry = _randint(rng, int(0.03 * s), int(0.12 * s))
-        color = (_randint(rng, 70, 150), _randint(rng, 50, 110), _randint(rng, 30, 70))
-        alpha = _randint(rng, 60, 160)
-        # 3 concentric ellipses -> soft-edged irregular stain
-        for k, factor in enumerate((1.0, 0.7, 0.4)):
-            draw.ellipse(
-                [cx - rx * factor, cy - ry * factor, cx + rx * factor, cy + ry * factor],
-                fill=(*color, int(alpha * (0.5 + 0.5 * k))),
-            )
-        entries.append({"center": [cx, cy], "rx": rx, "ry": ry, "color": list(color), "alpha": alpha})
-    return {"count": count, "stains": entries}, np.asarray(layer), None
-
-
-def draw_mold(rng: np.random.Generator, width: int, height: int, count: int):
-    layer = _blank_layer(width, height)
-    draw = ImageDraw.Draw(layer)
-    s = min(width, height)
-    clusters = []
-    for _ in range(count):
-        cx = _randint(rng, int(0.1 * width), int(0.9 * width))
-        cy = _randint(rng, int(0.1 * height), int(0.9 * height))
-        radius = _randint(rng, int(0.01 * s), int(0.04 * s))
-        dots = _randint(rng, 5, 30)
-        color = (_randint(rng, 40, 90), _randint(rng, 60, 120), _randint(rng, 40, 80))
-        alpha = _randint(rng, 120, 230)
-        for _ in range(dots):
-            dx = _randint(rng, -radius, radius)
-            dy = _randint(rng, -radius, radius)
-            x = max(0, min(width - 1, cx + dx))
-            y = max(0, min(height - 1, cy + dy))
-            dot_r = _randint(rng, 1, 3)
-            if dot_r == 1:
-                draw.point((x, y), fill=(*color, alpha))
-            else:
-                draw.ellipse([x - dot_r, y - dot_r, x + dot_r, y + dot_r], fill=(*color, alpha))
-        clusters.append({"center": [cx, cy], "radius": radius, "dots": dots, "color": list(color), "alpha": alpha})
-    return {"count": count, "clusters": clusters}, np.asarray(layer), None
 
 
 def draw_tear(rng: np.random.Generator, width: int, height: int, count: int):
@@ -516,57 +464,11 @@ def draw_missing_region(rng: np.random.Generator, width: int, height: int, count
     return {"count": count, "regions": entries}, np.asarray(overlay), np.asarray(fill)
 
 
-DRAW_FUNCS = {
-    "scratch": draw_scratch,
-    "crack": draw_crack,
+STRUCTURAL_FUNCS = {
     "fold": draw_fold,
-    "dust": draw_dust,
-    "stain": draw_stain,
-    "mold": draw_mold,
     "tear": draw_tear,
     "missing_region": draw_missing_region,
 }
-
-
-def _draw_full_scratch(rng: np.random.Generator, width: int, height: int):
-    """A guaranteed long scratch used when coverage cannot be reached by sampling."""
-    layer = _blank_layer(width, height)
-    s = min(width, height)
-    x0 = _randint(rng, int(0.05 * width), int(0.3 * width))
-    y0 = _randint(rng, int(0.2 * height), int(0.8 * height))
-    x1 = max(0, min(width - 1, x0 + int(s * _randfloat(rng, 0.6, 0.95))))
-    y1 = max(0, min(height - 1, y0 + _randint(rng, -int(0.1 * s), int(0.1 * s))))
-    line_width = max(3, int(s * _randfloat(rng, 0.01, 0.02)))
-    value = _randint(rng, 40, 90)
-    alpha = _randint(rng, 200, 255)
-    ImageDraw.Draw(layer).line([(x0, y0), (x1, y1)], fill=(value, value, value, alpha), width=line_width)
-    params = {"full_scratch": {"start": [x0, y0], "end": [x1, y1], "width": line_width, "value": value, "alpha": alpha}}
-    return params, np.asarray(layer), None
-
-
-def _sample_local_types(rng: np.random.Generator, severity: str) -> list[str]:
-    weights = {t: w for t, w in TYPE_WEIGHTS[severity].items() if w > 0}
-    if not weights:
-        return ["scratch"]
-    pool = list(weights)
-    k = min(_randint(rng, 2, 4), len(pool))
-    selected: list[str] = []
-    remaining = dict(weights)
-    for _ in range(k):
-        total = float(sum(remaining.values()))
-        r = rng.random() * total
-        cumulative = 0.0
-        for t, w in remaining.items():
-            cumulative += w
-            if r <= cumulative:
-                selected.append(t)
-                del remaining[t]
-                break
-    # Guarantee a fine-grained type is present so the mask cannot be empty.
-    if not any(t in selected for t in ("scratch", "dust", "fold")):
-        fallback = next((t for t in ("scratch", "dust", "fold") if t in remaining), selected[0])
-        selected.append(fallback)
-    return selected
 
 
 # --------------------------------------------------------------------------
@@ -804,28 +706,55 @@ def degrade_target(
         base, params = apply_uneven_exposure(base, rng, uneven, axis, sigma_px)
         steps.append({"op": "uneven_exposure", "params": params})
 
-    # ---- local damage pass ---------------------------------------------
+    # ---- local damage pass (texture-driven + structural) ---------------
     if cfg.local_enabled:
-        sampled_types = _sample_local_types(rng, severity)
+        texture_dir = Path(cfg.texture_dir) if cfg.texture_dir else DEFAULT_TEXTURE_DIR
+        texture_paths = list_texture_paths(texture_dir)
+        if not texture_paths:
+            raise FileNotFoundError(
+                f"No texture materials found in {texture_dir}. "
+                "Place the grunge texture files there before generating."
+            )
+
         elements: list[tuple[dict, np.ndarray, np.ndarray | None]] = []
-        for damage_type in sampled_types:
-            count = max(1, _randint(rng, *profile["local"][damage_type]["count"]))
-            params, overlay_arr, fill_arr = DRAW_FUNCS[damage_type](rng, width, height, count)
-            elements.append((params, overlay_arr, fill_arr))
+        structural_used: list[str] = []
+
+        # real-texture damage layers
+        t = profile["texture"]
+        n_textures = _randint(rng, *t["count"])
+        sampled = _sample_texture_paths(rng, texture_paths, n_textures)
+        opacity = _randfloat(rng, *t["opacity"])
+        edge_wear = _randfloat(rng, *t["edge_wear"])
+        darken = _randfloat(rng, *t["darken"])
+        target_cov = _randfloat(rng, *t["target_cov"])
+        for texture_path in sampled:
+            params, overlay_arr = _texture_damage_layer(
+                texture_path, rng, width, height, opacity, target_cov, edge_wear, darken
+            )
+            elements.append((params, overlay_arr, None))
+
+        # structural shapes (fold / tear / missing region)
+        for damage_type in STRUCTURAL_TYPES:
+            count = _randint(rng, *profile["structural"][damage_type]["count"])
+            if count > 0:
+                params, overlay_arr, fill_arr = STRUCTURAL_FUNCS[damage_type](rng, width, height, count)
+                elements.append((params, overlay_arr, fill_arr))
+                structural_used.append(damage_type)
 
         target_lo = max(profile["coverage_target"][0], cfg.min_coverage)
         target_hi = min(profile["coverage_target"][1], cfg.max_coverage)
 
-        # adapt upward until the lower bound is reached
+        # adapt upward until the lower bound is reached (more texture layers)
         rounds = 0
         while _union_coverage(elements, width, height) < target_lo and rounds < cfg.max_adapt_rounds:
-            params, overlay_arr, fill_arr = _draw_full_scratch(rng, width, height)
-            elements.append((params, overlay_arr, fill_arr))
+            extra = _sample_texture_paths(rng, texture_paths, 1)
+            if not extra:
+                break
+            params, overlay_arr = _texture_damage_layer(
+                extra[0], rng, width, height, opacity, target_cov, edge_wear, darken
+            )
+            elements.append((params, overlay_arr, None))
             rounds += 1
-        # if still short, keep adding full scratches (records as params)
-        while _union_coverage(elements, width, height) < target_lo:
-            params, overlay_arr, fill_arr = _draw_full_scratch(rng, width, height)
-            elements.append((params, overlay_arr, fill_arr))
 
         # trim only when the union exceeds the target ceiling; never drop below the lower bound
         while _union_coverage(elements, width, height) > target_hi and len(elements) > 1:
@@ -854,7 +783,9 @@ def degrade_target(
         steps.append({
             "op": "local_damage",
             "params": {
-                "types": sampled_types,
+                "texture_dir": str(texture_dir),
+                "textures": [el[0] for el in elements if "texture" in el[0]],
+                "structural_types": structural_used,
                 "elements": [el[0] for el in elements],
                 "coverage": round(coverage, 4),
                 "restoration_type": "local_repair",
@@ -866,7 +797,7 @@ def degrade_target(
         coverage = 0.0
         steps.append({
             "op": "local_damage",
-            "params": {"types": [], "coverage": 0.0, "restoration_type": "global_restoration"},
+            "params": {"textures": [], "coverage": 0.0, "restoration_type": "global_restoration"},
         })
 
     # ---- imaging pass --------------------------------------------------
@@ -917,29 +848,55 @@ def degrade_target(
 # Persistence
 # --------------------------------------------------------------------------
 
-def save_variant(
+def save_variant_files(
     output_root: Path,
     source_id: str,
     severity: str,
     variant: DegradedVariant,
-    target_sha256: str,
 ) -> None:
-    """Write degraded/mask/metadata for one variant under the documented layout."""
+    """Write the degraded image and mask PNGs for one variant."""
     output_root = Path(output_root)
     degraded_path = output_root / "degraded" / f"{source_id}_{severity}.png"
     mask_path = output_root / "masks" / f"{source_id}_{severity}.png"
-    metadata_path = output_root / "metadata" / f"{source_id}_{severity}.json"
     degraded_path.parent.mkdir(parents=True, exist_ok=True)
     variant.degraded.save(degraded_path, "PNG")
     variant.mask.save(mask_path, "PNG")
-    metadata = dict(variant.metadata)
-    metadata["files"] = {
-        "degraded": degraded_path.name,
-        "mask": mask_path.name,
+
+
+def write_source_metadata(
+    output_root: Path,
+    source_id: str,
+    target_sha256: str,
+    variants: dict[str, DegradedVariant],
+) -> None:
+    """Write a single ``metadata/<source_id>.json`` holding every severity variant.
+
+    Each variant keeps its own seed, restoration type, coverage and full step
+    parameters so nothing is lost, while matching the documented single-file
+    layout: ``metadata/source_000001.json``.
+    """
+    output_root = Path(output_root)
+    entries: dict[str, dict] = {}
+    for severity, variant in variants.items():
+        meta = dict(variant.metadata)
+        meta["files"] = {
+            "degraded": f"degraded/{source_id}_{severity}.png",
+            "mask": f"masks/{source_id}_{severity}.png",
+        }
+        entries[severity] = meta
+    doc = {
+        "source_id": source_id,
+        "target": f"target/{source_id}.png",
         "target_sha256": target_sha256,
+        "variants": entries,
     }
+    metadata_path = output_root / "metadata" / f"{source_id}.json"
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    metadata_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    # remove any legacy per-variant metadata files for this source
+    for legacy in metadata_path.parent.glob(f"{source_id}_*.json"):
+        if legacy.name != metadata_path.name:
+            legacy.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------

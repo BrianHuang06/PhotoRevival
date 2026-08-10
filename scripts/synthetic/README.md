@@ -6,12 +6,14 @@
 
 | 文件 | 职责 |
 |---|---|
-| `engine.py` | **退化引擎**（纯 numpy + Pillow，无 torch）。三类退化（全局/局部/成像）、RGBA 损坏层 → mask、覆盖率控制、确定性 RNG、保存与拼图 |
+| `engine.py` | **退化引擎**（numpy + Pillow）。三类退化（全局/局部/成像）。局部损坏**从真实纹理素材取样**（复用 `age_photo` 的纹理逻辑），RGBA 损坏层 → mask、覆盖率控制、确定性 RNG、保存与拼图 |
 | `generate.py` | **生成入口**（CLI）。从 `02_cleaned` 取 `clean_target_ok` 图片，输出到 `<batch>/05_synthetic_pairs` |
 | `verify.py` | **自动验证**（16 项可用性检查，含 fixture 演练与确定性复现） |
 | `README.md` | 本说明 |
 
-依赖：仅 numpy、Pillow。`photo_revival` 包仅用于路径常量（`generate.py`），未安装时脚本会自动把 `src/` 加入 `sys.path`。
+依赖：numpy、Pillow、`photo_revival`（纹理路径与 `age_photo` 工具）。未安装包时脚本会自动把 `src/` 加入 `sys.path`。
+
+**素材要求**：局部损坏来自 `data/textures/Resource-Boy-Grunge-Textures/Resource Boy - Grunge Textures/` 的真实 grunge 素材（缺素材会明确报错）。程序只画结构性损坏（折痕/撕裂/缺失），不自行生成纹理。
 
 ## 用法（从仓库根目录）
 
@@ -37,7 +39,7 @@ python -m scripts.synthetic.generate --verify-only --output-dir <output_root>
 ├── target/<source_id>.png                      # 干净目标图
 ├── degraded/<source_id>_{light,medium,heavy}.png
 ├── masks/<source_id>_{light,medium,heavy}.png  # 0=干净，255=损坏（来自损坏层 alpha）
-├── metadata/<source_id>_{light,medium,heavy}.json  # seed + 每步退化参数
+├── metadata/<source_id>.json                   # 单文件，内含 light/medium/heavy 三档各自的 seed + 每步退化参数
 ├── collages/<source_id>_comparison.png         # 供人工审核的对比拼图
 ├── manifest.csv / summary.json / contact_sheet.jpg
 ```
@@ -46,6 +48,6 @@ python -m scripts.synthetic.generate --verify-only --output-dir <output_root>
 
 - mask 直接来自局部损坏图层的 alpha，不是检测器预测。
 - mask 严格二值 {0,255}，与 target/degraded 尺寸一致，覆盖率目标 1%-35%。
-- 每个变体独立 seed，同参数重跑字节级一致（确定性见 engine.py）。
+- 每个变体独立 seed，记录在单文件 metadata 的对应档位里；同参数重跑字节级一致（确定性见 engine.py）。
 - `--global-only` 生成全图修复样本（`global_restoration`，mask 全零）。
 - 训练侧适配（`find_training_pairs` 后缀匹配、`prepare_masks` precomputed 模式）为后续工作，当前未实现。

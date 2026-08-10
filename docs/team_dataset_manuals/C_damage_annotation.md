@@ -175,7 +175,7 @@ data/work/batches/<batch_id>/05_synthetic_pairs/
 ├── target/<source_id>.png
 ├── degraded/<source_id>_<severity>.png
 ├── masks/<source_id>_<severity>.png        # 0=干净，255=损坏
-├── metadata/<source_id>_<severity>.json     # 种子 + 每步退化参数
+├── metadata/<source_id>.json               # 单文件，内含 light/medium/heavy 三档各自的种子 + 每步退化参数
 ├── collages/<source_id>_comparison.png
 ├── manifest.csv
 ├── summary.json
@@ -192,7 +192,8 @@ data/work/batches/<batch_id>/05_synthetic_pairs/
 
   全部通过退出码为 0，任一失败为 1，并逐项打印 PASS/FAIL 清单。
 - 局部 mask 来自损坏图层 alpha，不是检测器预测；全局褪色/噪声/模糊不产生局部 mask（用 `--global-only` 生成 `global_restoration` 样本）。
-- 每个变体独立 seed，记录在 metadata 中，同参数重跑结果字节级一致。
+- 每个变体独立 seed，记录在单文件 `metadata/<source_id>.json` 的对应档位里，同参数重跑结果字节级一致。
+- 局部损坏来自 `data/textures/Resource-Boy-Grunge-Textures/Resource Boy - Grunge Textures/` 的真实 grunge 素材；程序只画折痕/撕裂/缺失等结构性损坏，不自行生成纹理。
 - 本地无数据时可先 `--make-fixture` 生成确定性小样本演练。
 
 ## 10. 合成数据硬性要求

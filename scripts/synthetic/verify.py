@@ -201,16 +201,23 @@ def main() -> int:
 
         # 09 - metadata schema completeness
         def check_metadata() -> str:
+            # single metadata/<source_id>.json per source holding every severity variant
             manifest = gen.read_csv(out_dir / "manifest.csv")
+            sources_checked = 0
             for row in manifest:
                 meta = json.loads((out_dir / row["metadata_path"]).read_text(encoding="utf-8"))
-                for key in ("seed", "severity", "restoration_type", "mask_coverage", "image_size", "steps"):
-                    assert key in meta, f"{row['source_id']}/{row['severity']} missing metadata.{key}"
-                assert meta["severity"] == row["severity"]
-                assert meta["restoration_type"] == row["restoration_type"]
-                assert meta["steps"], f"{row['source_id']}/{row['severity']} has no steps"
-                assert all("op" in s and "params" in s for s in meta["steps"])
-            return "metadata schema complete (seed/severity/resto/steps)"
+                assert meta.get("source_id") == row["source_id"]
+                variants = meta.get("variants", {})
+                for sev in SEVERITIES:
+                    variant_meta = variants.get(sev)
+                    assert variant_meta is not None, f"{row['source_id']} missing variant {sev}"
+                    for key in ("seed", "severity", "restoration_type", "mask_coverage", "image_size", "steps"):
+                        assert key in variant_meta, f"{row['source_id']}/{sev} missing metadata.{key}"
+                    assert variant_meta["severity"] == sev
+                    assert variant_meta["steps"], f"{row['source_id']}/{sev} has no steps"
+                    assert all("op" in s and "params" in s for s in variant_meta["steps"])
+                sources_checked += 1
+            return f"{sources_checked} sources: single metadata file with all variants"
 
         # 10 - global-only mode
         def check_global_only() -> str:

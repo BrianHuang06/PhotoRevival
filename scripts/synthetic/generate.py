@@ -48,7 +48,8 @@ from scripts.synthetic.engine import (
     coverage_of,
     degrade_target,
     derive_variant_seed,
-    save_variant,
+    save_variant_files,
+    write_source_metadata,
 )
 from scripts.data.team_dataset_workflow import (
     IMAGE_SUFFIXES,
@@ -208,16 +209,20 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
                     )
         target_sha = sha256(target_out)
 
+        # single metadata file per source; if it exists the source is complete
+        metadata_path = metadata_dir / f"{source_id}.json"
+        if metadata_path.exists() and not args.force:
+            print(f"skip {source_id} (metadata exists)")
+            continue
+
+        variants_by_sev: dict[str, object] = {}
         for severity in severities:
-            metadata_path = metadata_dir / f"{source_id}_{severity}.json"
-            if metadata_path.exists() and not args.force:
-                print(f"skip {source_id} {severity} (metadata exists)")
-                continue
             seed = derive_variant_seed(args.global_seed, index, severity)
             with Image.open(target_out) as opened:
                 target_image = opened.convert("RGB")
             variant = degrade_target(target_image, severity, seed, cfg)
-            save_variant(output_root, source_id, severity, variant, target_sha)
+            save_variant_files(output_root, source_id, severity, variant)
+            variants_by_sev[severity] = variant
 
             processed_sources.append(source_id)
             new_variants += 1
@@ -237,10 +242,12 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
                 "target_path": f"target/{source_id}.png",
                 "degraded_path": f"degraded/{source_id}_{severity}.png",
                 "mask_path": f"masks/{source_id}_{severity}.png",
-                "metadata_path": f"metadata/{source_id}_{severity}.json",
+                "metadata_path": f"metadata/{source_id}.json",
                 "sha256_degraded": sha256(degraded_dir / f"{source_id}_{severity}.png"),
                 "created_at": utc_now(),
             }
+        if variants_by_sev:
+            write_source_metadata(output_root, source_id, target_sha, variants_by_sev)
 
         # comparison collage for this source (all requested severities that exist)
         if not args.no_collages:
@@ -426,21 +433,25 @@ def verify(args: argparse.Namespace, output_root: Path) -> None:
                     )
 
             metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-            if metadata.get("severity") != severity:
-                errors.append(f"{source_id}/{severity}: metadata severity mismatch")
-            if int(metadata.get("seed")) != int(row["seed"]):
-                errors.append(f"{source_id}/{severity}: metadata seed mismatch")
-            if metadata.get("restoration_type") != restored_type:
-                errors.append(f"{source_id}/{severity}: metadata restoration_type mismatch")
-            steps = metadata.get("steps") or []
-            if not steps:
-                errors.append(f"{source_id}/{severity}: metadata has no steps")
-            for step in steps:
-                if "op" not in step or "params" not in step:
-                    errors.append(f"{source_id}/{severity}: malformed step entry")
-            size = metadata.get("image_size")
-            if degraded_size is not None and size != list(degraded_size):
-                errors.append(f"{source_id}/{severity}: metadata image_size mismatch")
+            variant_meta = metadata.get("variants", {}).get(severity)
+            if variant_meta is None:
+                errors.append(f"{source_id}/{severity}: variant missing in single metadata file")
+            else:
+                if variant_meta.get("severity") != severity:
+                    errors.append(f"{source_id}/{severity}: metadata severity mismatch")
+                if int(variant_meta.get("seed")) != int(row["seed"]):
+                    errors.append(f"{source_id}/{severity}: metadata seed mismatch")
+                if variant_meta.get("restoration_type") != restored_type:
+                    errors.append(f"{source_id}/{severity}: metadata restoration_type mismatch")
+                steps = variant_meta.get("steps") or []
+                if not steps:
+                    errors.append(f"{source_id}/{severity}: metadata has no steps")
+                for step in steps:
+                    if "op" not in step or "params" not in step:
+                        errors.append(f"{source_id}/{severity}: malformed step entry")
+                size = variant_meta.get("image_size")
+                if degraded_size is not None and size != list(degraded_size):
+                    errors.append(f"{source_id}/{severity}: metadata image_size mismatch")
 
             # reproduction spot check (first variant only) - strongest guarantee
             if not reproduction_checked and restored_type == "local_repair":
