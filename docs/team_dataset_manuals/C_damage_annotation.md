@@ -157,6 +157,44 @@ metadata/source_000001.json
 - 局部：划痕、裂纹、折痕、污渍、霉斑、灰尘、撕裂、缺失。
 - 成像：模糊、胶片颗粒、Gaussian/Poisson 噪声、JPEG、下采样、扫描噪声。
 
+## 9.1 运行合成退化生成脚本
+
+从 B 的 `02_cleaned` 批次生成轻/中/重退化对和 mask：
+
+```powershell
+cd C:\Users\24211\PycharmProjects\PhotoRevival
+.\.venv\Scripts\python.exe -m scripts.synthetic.generate `
+  --batch-id 20260727_loc_pilot_001 `
+  --sample 20
+```
+
+脚本只取 `manifest.csv` 中 `quality_label=clean_target_ok` 的图片作为目标图，输出到：
+
+```text
+data/work/batches/<batch_id>/05_synthetic_pairs/
+├── target/<source_id>.png
+├── degraded/<source_id>_<severity>.png
+├── masks/<source_id>_<severity>.png        # 0=干净，255=损坏
+├── metadata/<source_id>_<severity>.json     # 种子 + 每步退化参数
+├── collages/<source_id>_comparison.png
+├── manifest.csv
+├── summary.json
+└── contact_sheet.jpg
+```
+
+- `--sample 20`：处理 20 张目标图（60 组样本），并额外生成 `sample_manifest.csv` 和 `contact_sheet_sample.jpg`，作为提交 D 审核的首批试样。
+- `--verify-only`：对已生成目录做自动验收（尺寸一致、mask 二值且非空、覆盖率在界内、种子复现），失败退出码为 2。
+- **一条命令跑全部可用性验证**（fixture 生成、端到端生成、自检、确定性复现、全局/样例/幂等模式、参数校验，无需真实数据）：
+
+  ```powershell
+  python -m scripts.synthetic.verify
+  ```
+
+  全部通过退出码为 0，任一失败为 1，并逐项打印 PASS/FAIL 清单。
+- 局部 mask 来自损坏图层 alpha，不是检测器预测；全局褪色/噪声/模糊不产生局部 mask（用 `--global-only` 生成 `global_restoration` 样本）。
+- 每个变体独立 seed，记录在 metadata 中，同参数重跑结果字节级一致。
+- 本地无数据时可先 `--make-fixture` 生成确定性小样本演练。
+
 ## 10. 合成数据硬性要求
 
 1. 每个版本保存随机种子。
