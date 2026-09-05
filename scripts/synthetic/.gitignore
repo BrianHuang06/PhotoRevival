@@ -1,3 +1,7 @@
 __pycache__/
 generated_preview/
 texture_reviews/
+.verify_tmp/
+test_assets/
+test_outputs/
+generated_from_manifest/

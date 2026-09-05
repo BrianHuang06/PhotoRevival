@@ -75,6 +75,9 @@ SYNTHETIC_MANIFEST_FIELDS = [
     "damage_score", "layer_count", "label_combination", "width", "height",
     "target_path", "degraded_path", "mask_path", "metadata_path",
     "sha256_degraded", "created_at",
+    "source_filename", "source_path", "source_quality_label",
+    "source_content_type", "source_provider", "source_license",
+    "source_sha256", "source_split", "source_damage_label_list",
 ]
 
 DEFAULT_FIXTURE_DIR = Path("artifacts/synthetic_fixture/clean")
@@ -415,6 +418,13 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
     if manifest_csv.is_file():
         for row in read_csv(manifest_csv):
             manifest_index[(row["source_id"], row["severity"])] = row
+    source_metadata: dict[str, dict[str, str]] = {}
+    if getattr(args, "manifest", None) and Path(args.manifest).is_file():
+        source_metadata = {
+            row.get("source_id", ""): row
+            for row in read_csv(Path(args.manifest))
+            if row.get("source_id")
+        }
 
     processed_sources: list[str] = []
     new_variants = 0
@@ -465,6 +475,15 @@ def generate(args: argparse.Namespace, sources: list[tuple[str, Path]], output_r
                 "metadata_path": f"metadata/{source_id}.json",
                 "sha256_degraded": sha256(degraded_dir / f"{source_id}_{severity}.png"),
                 "created_at": utc_now(),
+                "source_filename": source_metadata.get(source_id, {}).get("filename", image_path.name),
+                "source_path": source_metadata.get(source_id, {}).get("source_path", str(image_path)),
+                "source_quality_label": source_metadata.get(source_id, {}).get("quality_label", ""),
+                "source_content_type": source_metadata.get(source_id, {}).get("content_type", ""),
+                "source_provider": source_metadata.get(source_id, {}).get("provider", ""),
+                "source_license": source_metadata.get(source_id, {}).get("license", ""),
+                "source_sha256": source_metadata.get(source_id, {}).get("sha256", ""),
+                "source_split": source_metadata.get(source_id, {}).get("split", ""),
+                "source_damage_label_list": source_metadata.get(source_id, {}).get("damage_label_list", ""),
             }
         if variants_by_sev:
             write_source_metadata(output_root, source_id, target_sha, variants_by_sev)

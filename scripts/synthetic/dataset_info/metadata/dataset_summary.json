@@ -1,0 +1,35 @@
+{
+  "dataset_rows": 2101,
+  "class_counts": {
+    "damaged_obvious": 1239,
+    "clean_near": 862
+  },
+  "image_dir": "dataset_images",
+  "index_files": [
+    "indexes/dataset_index.csv",
+    "indexes/damaged_index.csv",
+    "indexes/clean_index.csv"
+  ],
+  "label_files": [
+    "labels/dataset_labels.csv",
+    "labels/damage_labels.csv",
+    "labels/texture_catalog.csv"
+  ],
+  "source_manifest": "provenance/source_manifest.csv",
+  "damage_types": [
+    "scratch",
+    "crack",
+    "fold",
+    "dust",
+    "stain",
+    "mold",
+    "tear",
+    "missing_region",
+    "fading",
+    "color_cast",
+    "blur",
+    "noise",
+    "jpeg_artifact",
+    "uneven_exposure"
+  ]
+}
